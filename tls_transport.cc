@@ -20,6 +20,7 @@ TlsTransport::~TlsTransport() {
 bool TlsTransport::Connect(const char* host, int port) {
     esp_tls_cfg_t cfg = {};
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.timeout_ms = 2000;
 
     int ret = esp_tls_conn_new_sync(host, strlen(host), port, &cfg, tls_client_);
     if (ret != 1) {
@@ -45,6 +46,11 @@ int TlsTransport::Send(const char* data, size_t length) {
         vTaskDelay(1);
         return 0;
     }
+    if (ret == ESP_TLS_ERR_SSL_TIMEOUT) {
+        connected_ = false;
+        ESP_LOGE(TAG, "TLS发送超时");
+        return -1;
+    }
     if (ret <= 0) {
         connected_ = false;
         ESP_LOGE(TAG, "TLS发送失败: %d", ret);
@@ -56,6 +62,10 @@ int TlsTransport::Receive(char* buffer, size_t bufferSize) {
     int ret = 0;
     do {
         ret = esp_tls_conn_read(tls_client_, buffer, bufferSize);
+        if (ret == ESP_TLS_ERR_SSL_TIMEOUT) {
+            ESP_LOGE(TAG, "TLS读取超时");
+            return -1;
+        }
     } while (ret == ESP_TLS_ERR_SSL_WANT_READ);
 
     if (ret == 0) {

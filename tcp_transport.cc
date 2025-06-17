@@ -48,6 +48,14 @@ bool TcpTransport::Connect(const char* host, int port) {
         return false;
     }
 
+    // Set send timeout to 5 seconds
+    struct timeval timeout;
+    timeout.tv_sec = 2;
+    timeout.tv_usec = 0;
+    if (setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+        ESP_LOGW(TAG, "Failed to set send timeout");
+    }
+
     connected_ = true;
     return true;
 }
@@ -68,9 +76,15 @@ int TcpTransport::Send(const char* data, size_t length) {
             return ret;
         }
 
-        if (errno == EINPROGRESS) {
+        if (errno == EINPROGRESS || errno == EAGAIN) {
             vTaskDelay(1);
             continue;
+        }
+
+        if (errno == EWOULDBLOCK || errno == ETIMEDOUT) {
+            ESP_LOGE(TAG, "Send timeout");
+            connected_ = false;
+            return -1;
         }
 
         connected_ = false;

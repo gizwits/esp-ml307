@@ -7,6 +7,6 @@ files:
   - dist
 license: MIT
 maintainer: Terrence <terrence@tenclass.com>
-repository: https://github.com/78/esp-ml307
-url: https://github.com/78/esp-ml307
-version: 2.2.1
+repository: https://github.com/gizwits/esp-ml307
+url: https://github.com/gizwits/esp-ml307
+version: 2.2.2

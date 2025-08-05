@@ -13,7 +13,7 @@ public:
     virtual int Send(const std::string& data) = 0;
 
     virtual void OnMessage(std::function<void(const std::string& data)> callback) {
-        message_callback_ = callback;
+        message_callback_ = std::move(callback);
     }
     bool connected() const { return connected_; }
 

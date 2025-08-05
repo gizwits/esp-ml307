@@ -16,9 +16,9 @@ public:
     virtual bool Unsubscribe(const std::string topic) = 0;
     virtual bool IsConnected() = 0;
 
-    virtual void OnConnected(std::function<void()> callback) { on_connected_callback_ = callback; }
-    virtual void OnDisconnected(std::function<void()> callback) { on_disconnected_callback_ = callback; }
-    virtual void OnMessage(std::function<void(const std::string& topic, const std::string& payload)> callback) { on_message_callback_ = callback; }
+    virtual void OnConnected(std::function<void()> callback) { on_connected_callback_ = std::move(callback); }
+    virtual void OnDisconnected(std::function<void()> callback) { on_disconnected_callback_ = std::move(callback); }
+    virtual void OnMessage(std::function<void(const std::string& topic, const std::string& payload)> callback) { on_message_callback_ = std::move(callback); }
 
 protected:
     int keep_alive_seconds_ = 120;

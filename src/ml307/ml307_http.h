@@ -1,7 +1,7 @@
 #ifndef ML307_HTTP_TRANSPORT_H
 #define ML307_HTTP_TRANSPORT_H
 
-#include "ml307_at_modem.h"
+#include "at_uart.h"
 #include "http.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
@@ -20,7 +20,7 @@
 
 class Ml307Http : public Http {
 public:
-    Ml307Http(Ml307AtModem& modem);
+    Ml307Http(std::shared_ptr<AtUart> at_uart);
     ~Ml307Http();
 
     void SetTimeout(int timeout_ms) override;
@@ -37,7 +37,7 @@ public:
     std::string ReadAll() override;
 
 private:
-    Ml307AtModem& modem_;
+    std::shared_ptr<AtUart> at_uart_;
     EventGroupHandle_t event_group_handle_;
     std::mutex mutex_;
     std::condition_variable cv_;
@@ -47,7 +47,7 @@ private:
     int error_code_ = -1;
     int timeout_ms_ = 30000;
     std::string rx_buffer_;
-    std::list<CommandResponseCallback>::iterator command_callback_it_;
+    std::list<UrcCallback>::iterator urc_callback_it_;
     std::map<std::string, std::string> headers_;
     std::string url_;
     std::string method_;
@@ -60,7 +60,7 @@ private:
     size_t body_offset_ = 0;
     size_t content_length_ = 0;
     bool eof_ = false;
-    bool connected_ = false;
+    bool instance_active_ = false;
     bool request_chunked_ = false;
     bool response_chunked_ = false;
 

@@ -34,6 +34,8 @@ bool EspMqtt::Connect(const std::string broker_address, int broker_port, const s
     mqtt_config.credentials.username = username.c_str();
     mqtt_config.credentials.authentication.password = password.c_str();
     mqtt_config.session.keepalive = keep_alive_seconds_;
+    mqtt_config.network.disable_auto_reconnect = true;
+
 
     mqtt_client_handle_ = esp_mqtt_client_init(&mqtt_config);
     esp_mqtt_client_register_event(mqtt_client_handle_, MQTT_EVENT_ANY, [](void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data) {
@@ -56,6 +58,11 @@ void EspMqtt::MqttEventCallback(esp_event_base_t base, int32_t event_id, void *e
     case MQTT_EVENT_DISCONNECTED:
         connected_ = false;
         xEventGroupSetBits(event_group_handle_, MQTT_DISCONNECTED_EVENT);
+        ESP_LOGI(TAG, "MQTT disconnected");
+        // 回调
+        if (on_disconnected_callback_) {
+            on_disconnected_callback_();
+        }
         break;
     case MQTT_EVENT_DATA: {
         auto topic = std::string(event->topic, event->topic_len);

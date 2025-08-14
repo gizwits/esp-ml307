@@ -249,13 +249,15 @@ bool AtUart::DetectBaudRate() {
         for (size_t i = 0; i < sizeof(baud_rates) / sizeof(baud_rates[0]); i++) {
             int rate = baud_rates[i];
             uart_set_baudrate(uart_num_, rate);
+            vTaskDelay(pdMS_TO_TICKS(50));
+
             if (SendCommand("AT", 20)) {
                 ESP_LOGI(TAG, "Detected baud rate: %d", rate);
                 baud_rate_ = rate;
                 return true;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(950));
     }
     return false;
 }

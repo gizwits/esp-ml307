@@ -17,7 +17,8 @@ Ml307Mqtt::Ml307Mqtt(std::shared_ptr<AtUart> at_uart, int mqtt_id) : at_uart_(at
                     } else {
                         if (connected_) {
                             connected_ = false;
-                            if (on_disconnected_callback_) {
+                            // 用户主动断开不需要回调
+                            if (on_disconnected_callback_ && arguments[2].int_value != 2) {
                                 on_disconnected_callback_();
                             }
                         }

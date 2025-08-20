@@ -6,6 +6,6 @@ files:
   - .git
   - dist
 license: MIT
-repository: https://github.com/kylewang/esp-ml307
-url: https://github.com/kylewang/esp-ml307
-version: 3.2.7
+repository: https://github.com/78/esp-ml307
+url: https://github.com/78/esp-ml307
+version: 3.3.0

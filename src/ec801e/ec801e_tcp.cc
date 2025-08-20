@@ -137,18 +137,14 @@ int Ec801ETcp::Send(const std::string& data) {
         
         std::string command = "AT+QISEND=" + std::to_string(tcp_id_) + "," + std::to_string(chunk_size);
         
-        if (!at_uart_->SendCommand(command)) {
-            ESP_LOGE(TAG, "Send command failed");
+        // 使用原子方法发送命令和数据，避免并发问题
+        if (!at_uart_->SendCommandWithData(command, data.data() + total_sent, chunk_size)) {
+            ESP_LOGE(TAG, "Send command and data failed");
             Disconnect();
             return -1;
         }
         
-        if (!at_uart_->SendData(data.data() + total_sent, chunk_size)) {
-            ESP_LOGE(TAG, "Send data block failed");
-            Disconnect();
-            return -1;
-        }
-        
+        // 等待发送完成
         auto bits = xEventGroupWaitBits(event_group_handle_, EC801E_TCP_SEND_COMPLETE | EC801E_TCP_SEND_FAILED, pdTRUE, pdFALSE, pdMS_TO_TICKS(TCP_CONNECT_TIMEOUT_MS));
         if (bits & EC801E_TCP_SEND_FAILED) {
             ESP_LOGE(TAG, "Send failed, retry later");

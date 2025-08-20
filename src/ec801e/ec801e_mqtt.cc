@@ -27,7 +27,8 @@ Ec801EMqtt::Ec801EMqtt(std::shared_ptr<AtUart> at_uart, int mqtt_id) : at_uart_(
                 } else {
                     if (connected_) {
                         connected_ = false;
-                        if (on_disconnected_callback_) {
+                        // 用户主动断开不需要回调
+                        if (on_disconnected_callback_ && error_code_ != 8) {
                             on_disconnected_callback_();
                         }
                     }
@@ -54,15 +55,28 @@ Ec801EMqtt::~Ec801EMqtt() {
 
 bool Ec801EMqtt::Connect(const std::string broker_address, int broker_port, const std::string client_id, const std::string username, const std::string password) {
     EventBits_t bits;
-    if (IsConnected()) {
-        // 断开之前的连接
-        Disconnect();
-        bits = xEventGroupWaitBits(event_group_handle_, EC801E_MQTT_DISCONNECTED_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(EC801E_MQTT_CONNECT_TIMEOUT_MS));
-        if (!(bits & EC801E_MQTT_DISCONNECTED_EVENT)) {
-            ESP_LOGE(TAG, "Failed to disconnect from previous connection");
-            return false;
-        }
+    
+    // 首先关闭之前的 MQTT 连接，确保状态干净
+    // 存在一种情况是模组重启
+    std::string close_command = "AT+QMTCLOSE=" + std::to_string(mqtt_id_);
+    if (!at_uart_->SendCommand(close_command)) {
+        ESP_LOGW(TAG, "Failed to close previous MQTT connection, but continue...");
+    } else {
+        ESP_LOGI(TAG, "Previous MQTT connection closed successfully");
     }
+    
+    // 等待一小段时间确保关闭操作完成
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // if (IsConnected()) {
+    //     // 断开之前的连接
+    //     Disconnect();
+    //     bits = xEventGroupWaitBits(event_group_handle_, EC801E_MQTT_DISCONNECTED_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(EC801E_MQTT_CONNECT_TIMEOUT_MS));
+    //     if (!(bits & EC801E_MQTT_DISCONNECTED_EVENT)) {
+    //         ESP_LOGE(TAG, "Failed to disconnect from previous connection");
+    //         return false;
+    //     }
+    // }
 
     if (broker_port == 8883) {
         // Config SSL Context
@@ -173,13 +187,9 @@ bool Ec801EMqtt::Publish(const std::string topic, const std::string payload, int
     // If payload size is larger than 64KB, a CME ERROR 601 will be returned.
     std::string command = "AT+QMTPUBEX=" + std::to_string(mqtt_id_) + ",0,0,0,\"" + topic + "\",";
     command += std::to_string(payload.size());
-    if (!at_uart_->SendCommand(command)) {
-        return false;
-    }
-    if (!at_uart_->SendData(payload.data(), payload.size())) {
-        return false;
-    }
-    return true;
+    
+    // 使用原子方法发送命令和数据，避免并发问题
+    return at_uart_->SendCommandWithData(command, payload.data(), payload.size());
 }
 
 bool Ec801EMqtt::Subscribe(const std::string topic, int qos) {

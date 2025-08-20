@@ -9,9 +9,9 @@
 
 static const char* TAG = "AtModem";
 
-std::unique_ptr<AtModem> AtModem::Detect(gpio_num_t tx_pin, gpio_num_t rx_pin, gpio_num_t dtr_pin, int baud_rate) {
+std::unique_ptr<AtModem> AtModem::Detect(gpio_num_t tx_pin, gpio_num_t rx_pin, gpio_num_t dtr_pin, int baud_rate, uart_port_t uart_num) {
     // 创建AtUart进行检测
-    auto uart = std::make_shared<AtUart>(tx_pin, rx_pin, dtr_pin);
+    auto uart = std::make_shared<AtUart>(tx_pin, rx_pin, dtr_pin, uart_num);
     uart->Initialize();
     
     // 设置波特率

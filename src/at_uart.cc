@@ -10,8 +10,8 @@
 
 
 // AtUart 构造函数实现
-AtUart::AtUart(gpio_num_t tx_pin, gpio_num_t rx_pin, gpio_num_t dtr_pin)
-    : tx_pin_(tx_pin), rx_pin_(rx_pin), dtr_pin_(dtr_pin), uart_num_(UART_NUM),
+AtUart::AtUart(gpio_num_t tx_pin, gpio_num_t rx_pin, gpio_num_t dtr_pin, uart_port_t uart_num)
+    : tx_pin_(tx_pin), rx_pin_(rx_pin), dtr_pin_(dtr_pin), uart_num_(uart_num),
       baud_rate_(115200), initialized_(false),
       event_task_handle_(nullptr), event_queue_handle_(nullptr), event_group_handle_(nullptr) {
 }
@@ -45,6 +45,7 @@ void AtUart::Initialize() {
     uart_config.parity = UART_PARITY_DISABLE;
     uart_config.stop_bits = UART_STOP_BITS_1;
     uart_config.source_clk = UART_SCLK_DEFAULT;
+    ESP_LOGI(TAG, "init uart ml307 %d", uart_num_);
     
     ESP_ERROR_CHECK(uart_driver_install(uart_num_, 8192, 0, 100, &event_queue_handle_, ESP_INTR_FLAG_IRAM));
     ESP_ERROR_CHECK(uart_param_config(uart_num_, &uart_config));
@@ -249,15 +250,13 @@ bool AtUart::DetectBaudRate() {
         for (size_t i = 0; i < sizeof(baud_rates) / sizeof(baud_rates[0]); i++) {
             int rate = baud_rates[i];
             uart_set_baudrate(uart_num_, rate);
-            vTaskDelay(pdMS_TO_TICKS(50));
-
             if (SendCommand("AT", 20)) {
                 ESP_LOGI(TAG, "Detected baud rate: %d", rate);
                 baud_rate_ = rate;
                 return true;
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(950));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
     return false;
 }
@@ -282,6 +281,8 @@ bool AtUart::SetBaudRate(int new_baud_rate) {
 }
 
 bool AtUart::SendData(const char* data, size_t length) {
+    // ESP_LOGW(TAG, ">> %.*s (%zu bytes)", (int)length, data, length);
+
     if (!initialized_) {
         ESP_LOGE(TAG, "UART未初始化");
         return false;
@@ -296,13 +297,13 @@ bool AtUart::SendData(const char* data, size_t length) {
 }
 
 bool AtUart::SendCommand(const std::string& command, size_t timeout_ms, bool add_crlf) {
-    ESP_LOGD(TAG, ">> %.64s (%u bytes)", command.data(), command.length());
 
     std::lock_guard<std::mutex> lock(command_mutex_);
     xEventGroupClearBits(event_group_handle_, AT_EVENT_COMMAND_DONE | AT_EVENT_COMMAND_ERROR);
     wait_for_response_ = true;
     cme_error_code_ = 0;
     response_.clear();
+    // ESP_LOGW(TAG, ">> %.64s (%u bytes)", command.data(), command.length());
 
     if (add_crlf) {
         if (!SendData((command + "\r\n").data(), command.length() + 2)) {
@@ -315,6 +316,43 @@ bool AtUart::SendCommand(const std::string& command, size_t timeout_ms, bool add
     }
     if (timeout_ms > 0) {
         auto bits = xEventGroupWaitBits(event_group_handle_, AT_EVENT_COMMAND_DONE | AT_EVENT_COMMAND_ERROR, pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
+        wait_for_response_ = false;
+        return bits & AT_EVENT_COMMAND_DONE;
+    } else {
+        wait_for_response_ = false;
+    }
+    return true;
+}
+
+bool AtUart::SendCommandWithData(const std::string& command, const char* data, size_t data_length, size_t timeout_ms) {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    xEventGroupClearBits(event_group_handle_, AT_EVENT_COMMAND_DONE | AT_EVENT_COMMAND_ERROR);
+    wait_for_response_ = true;
+    cme_error_code_ = 0;
+    response_.clear();
+    
+    // 原子性地发送命令和数据
+    if (!SendData((command + "\r\n").data(), command.length() + 2)) {
+        wait_for_response_ = false;
+        return false;
+    }
+    
+    // 等待命令响应（通常是 ">" 提示符）
+    auto bits = xEventGroupWaitBits(event_group_handle_, AT_EVENT_COMMAND_DONE | AT_EVENT_COMMAND_ERROR, pdTRUE, pdFALSE, pdMS_TO_TICKS(5000));
+    if (!(bits & AT_EVENT_COMMAND_DONE)) {
+        wait_for_response_ = false;
+        return false;
+    }
+    
+    // 发送数据
+    if (!SendData(data, data_length)) {
+        wait_for_response_ = false;
+        return false;
+    }
+    
+    // 等待最终响应
+    if (timeout_ms > 0) {
+        bits = xEventGroupWaitBits(event_group_handle_, AT_EVENT_COMMAND_DONE | AT_EVENT_COMMAND_ERROR, pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
         wait_for_response_ = false;
         return bits & AT_EVENT_COMMAND_DONE;
     } else {

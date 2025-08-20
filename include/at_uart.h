@@ -51,7 +51,7 @@ typedef std::function<void(const std::string& command, const std::vector<AtArgum
 class AtUart {
 public:
     // 构造函数
-    AtUart(gpio_num_t tx_pin, gpio_num_t rx_pin, gpio_num_t dtr_pin = GPIO_NUM_NC);
+    AtUart(gpio_num_t tx_pin, gpio_num_t rx_pin, gpio_num_t dtr_pin = GPIO_NUM_NC, uart_port_t uart_num = UART_NUM);
     ~AtUart();
 
     // 初始化和配置
@@ -64,6 +64,8 @@ public:
     // 数据发送
     bool SendData(const char* data, size_t length);
     bool SendCommand(const std::string& command, size_t timeout_ms = 1000, bool add_crlf = true);
+    // 新增：原子性地发送命令和数据，避免并发问题
+    bool SendCommandWithData(const std::string& command, const char* data, size_t data_length, size_t timeout_ms = 1000);
     const std::string& GetResponse() const { return response_; }
     int GetCmeErrorCode() const { return cme_error_code_; }
     

@@ -98,11 +98,27 @@ int EspTcp::Send(const std::string& data) {
     size_t total_sent = 0;
     size_t data_size = data.size();
     const char* data_ptr = data.data();
+    int retry_count = 0;
+    const int max_retries = 100;  // 最多重试100次，约1秒
     
     while (total_sent < data_size) {
         int ret = send(tcp_fd_, data_ptr + total_sent, data_size - total_sent, 0);
         
         if (ret <= 0) {
+            if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                // 发送缓冲区满，等待一会再试
+                if (++retry_count > max_retries) {
+                    ESP_LOGE(TAG, "Send buffer full timeout after %d retries", max_retries);
+                    connected_ = false;
+                    if (disconnect_callback_) {
+                        disconnect_callback_();
+                    }
+                    return total_sent;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+            
             ESP_LOGE(TAG, "Send failed: ret=%d, errno=%d", ret, errno);
             // 其他错误，认为连接失败
             connected_ = false;
@@ -112,6 +128,8 @@ int EspTcp::Send(const std::string& data) {
             return total_sent;
         }
         
+        // 发送成功，重置重试计数
+        retry_count = 0;
         total_sent += ret;
     }
     

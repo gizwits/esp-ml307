@@ -27,7 +27,7 @@ public:
     void Close();
 
     void OnConnected(std::function<void()> callback);
-    void OnDisconnected(std::function<void()> callback);
+    void OnDisconnected(std::function<void(bool is_clean)> callback);
     void OnData(std::function<void(const char*, size_t, bool binary)> callback);
     void OnError(std::function<void(int)> callback);
 
@@ -50,7 +50,8 @@ private:
     std::function<void(const char*, size_t, bool binary)> on_data_;
     std::function<void(int)> on_error_;
     std::function<void()> on_connected_;
-    std::function<void()> on_disconnected_;
+    std::function<void(bool is_clean)> on_disconnected_;
+    bool is_closing_ = false;  // 标记是否主动关闭
 
     void OnTcpData(const std::string& data);
     bool SendControlFrame(uint8_t opcode, const void* data, size_t len);

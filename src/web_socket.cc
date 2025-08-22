@@ -163,8 +163,10 @@ bool WebSocket::Connect(const char* uri) {
     tcp_->OnDisconnected([this]() {
         if (connected_) {
             connected_ = false;
+            bool was_closing = is_closing_;
+            is_closing_ = false;  // 重置标志
             if (on_disconnected_) {
-                on_disconnected_();
+                on_disconnected_(was_closing);  // false 表示异常断开（TCP层）
             }
         }
     });
@@ -255,6 +257,7 @@ void WebSocket::Ping() {
 
 void WebSocket::Close() {
     if (connected_) {
+        is_closing_ = true;  // 标记为主动关闭
         SendControlFrame(0x8, nullptr, 0);
     }
 }
@@ -263,7 +266,7 @@ void WebSocket::OnConnected(std::function<void()> callback) {
     on_connected_ = callback;
 }
 
-void WebSocket::OnDisconnected(std::function<void()> callback) {
+void WebSocket::OnDisconnected(std::function<void(bool is_clean)> callback) {
     on_disconnected_ = callback;
 }
 
@@ -375,9 +378,13 @@ void WebSocket::OnTcpData(const std::string& data) {
                 }
                 break;
             case 0x8: // 关闭帧
-                connected_ = false;
-                if (on_disconnected_) {
-                    on_disconnected_();
+                {
+                    connected_ = false;
+                    bool was_closing = is_closing_;
+                    is_closing_ = false;  // 重置标志
+                    if (on_disconnected_) {
+                        on_disconnected_(true);  // true 表示正常关闭（收到关闭帧）
+                    }
                 }
                 break;
             case 0x9: // Ping

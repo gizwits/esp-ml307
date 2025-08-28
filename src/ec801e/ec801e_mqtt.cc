@@ -196,7 +196,12 @@ bool Ec801EMqtt::Subscribe(const std::string topic, int qos) {
     if (!connected_) {
         return false;
     }
-    std::string command = "AT+QMTSUB=" + std::to_string(mqtt_id_) + ",0,\"" + topic + "\"," + std::to_string(qos);
+    // 订阅不能用同一个 msgid。。。
+    
+    static int msg_id = 0;
+
+    std::string command = "AT+QMTSUB=" + std::to_string(mqtt_id_) + "," + std::to_string(msg_id++) + ",\"" + topic + "\"," + std::to_string(qos);
+
     return at_uart_->SendCommand(command);
 }
 

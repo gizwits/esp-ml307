@@ -388,7 +388,6 @@ void WebSocket::OnTcpData(const std::string& data) {
                 }
                 break;
             case 0x9: // Ping
-                
                 {
                     // 发送 Pong - 使用延迟发送避免线程冲突
                     ESP_LOGI(TAG, "Received ping, will send pong");
@@ -397,7 +396,6 @@ void WebSocket::OnTcpData(const std::string& data) {
                         .callback = [](void* arg) {
                             WebSocket* ws = static_cast<WebSocket*>(arg);
                             ws->SendControlFrame(0xA, nullptr, 0);
-                            ESP_LOGI(TAG, "Sent pong");
                         },
                         .arg = this,
                         .name = "pong_timer"

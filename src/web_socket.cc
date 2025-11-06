@@ -389,13 +389,27 @@ void WebSocket::OnTcpData(const std::string& data) {
                 break;
             case 0x9: // Ping
                 {
+
                     // 发送 Pong - 使用延迟发送避免线程冲突
                     ESP_LOGI(TAG, "Received ping, will send pong");
+                    // 将 payload 复制到成员变量，供定时器回调使用
+                    pong_payload_length_ = (payload_length > 125) ? 125 : payload_length;
+                    if (pong_payload_length_ > 0) {
+                        memcpy(pong_payload_, payload.data(), pong_payload_length_);
+                    }
                     // 延迟发送 pong，避免在回调线程中直接调用串口
                     esp_timer_create_args_t timer_args = {
                         .callback = [](void* arg) {
                             WebSocket* ws = static_cast<WebSocket*>(arg);
+                            ESP_LOGI(TAG, "Sending pong");
+#ifdef CONFIG_PROTOCOL_TYPE_COZE
+
                             ws->SendControlFrame(0xA, nullptr, 0);
+#else
+                            ws->SendControlFrame(0xA, ws->pong_payload_, ws->pong_payload_length_);
+
+#endif
+
                         },
                         .arg = this,
                         .name = "pong_timer"

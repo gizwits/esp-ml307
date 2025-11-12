@@ -12,6 +12,13 @@ public:
     // Set timeout
     virtual void SetTimeout(int timeout_ms) = 0;
 
+    // 设置最大缓冲区大小，用于限流（0表示不限制，默认实现为空）
+    virtual void SetMaxBufferSize(size_t max_size) {}
+    
+    // 设置接收限流回调（返回true表示可以接收，false表示暂停接收）
+    // 这个回调会优先于 SetMaxBufferSize 使用，用于更精确的限流控制
+    virtual void SetCanReceiveCallback(std::function<bool()> callback) {}
+
     // 设置 HTTP 请求头
     virtual void SetHeader(const std::string& key, const std::string& value) = 0;
 

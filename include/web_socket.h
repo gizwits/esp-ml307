@@ -52,8 +52,8 @@ private:
     std::function<void()> on_connected_;
     std::function<void(bool is_clean)> on_disconnected_;
     bool is_closing_ = false;  // 标记是否主动关闭
-    uint8_t pong_payload_[125];
     size_t pong_payload_length_ = 0;
+    uint8_t pong_payload_[125];
 
     void OnTcpData(const std::string& data);
     bool SendControlFrame(uint8_t opcode, const void* data, size_t len);

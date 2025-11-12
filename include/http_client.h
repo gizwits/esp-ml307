@@ -29,6 +29,8 @@ public:
     ~HttpClient();
 
     void SetTimeout(int timeout_ms) override;
+    void SetMaxBufferSize(size_t max_size) override;  // 设置最大缓冲区大小，用于限流（0表示不限制）
+    void SetCanReceiveCallback(std::function<bool()> callback) override;  // 设置接收限流回调
     void SetHeader(const std::string& key, const std::string& value) override;
     void SetContent(std::string&& content) override;
     bool Open(const std::string& method, const std::string& url) override;
@@ -81,6 +83,8 @@ private:
 
     NetworkInterface* network_;
     int connect_id_;
+    size_t max_buffer_size_ = 0;  // 最大缓冲区大小，0表示不限制
+    std::function<bool()> can_receive_callback_;  // 接收限流回调（优先使用）
     std::unique_ptr<Tcp> tcp_;
     EventGroupHandle_t event_group_handle_;
     std::mutex mutex_;

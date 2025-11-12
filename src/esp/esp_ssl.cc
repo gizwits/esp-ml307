@@ -114,10 +114,18 @@ int EspSsl::Send(const std::string& data) {
 void EspSsl::ReceiveTask() {
     std::string data;
     while (connected_) {
+        // 检查是否可以接收数据（限流检查）
+        if (can_receive_callback_ && !can_receive_callback_()) {
+            // 缓冲区快满了，延迟接收
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        
         data.resize(1500);
         int ret = esp_tls_conn_read(tls_client_, data.data(), data.size());
 
         if (ret == ESP_TLS_ERR_SSL_WANT_READ) {
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 

@@ -139,11 +139,24 @@ int EspTcp::Send(const std::string& data) {
 void EspTcp::ReceiveTask() {
     std::string data;
     while (connected_) {
+        // 检查是否可以接收数据（限流检查）
+        if (can_receive_callback_ && !can_receive_callback_()) {
+            // 缓冲区快满了，延迟接收
+            vTaskDelay(pdMS_TO_TICKS(10));
+            // ESP_LOGD(TAG, "Buffer is full, delaying receive");
+            continue;
+        }
+        
         data.resize(1500);
         int ret = recv(tcp_fd_, data.data(), data.size(), 0);
         if (ret <= 0) {
             if (ret < 0) {
-                ESP_LOGE(TAG, "TCP receive failed: %d", ret);
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // 没有数据可读，短暂等待
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    continue;
+                }
+                ESP_LOGE(TAG, "TCP receive failed: %d", errno);
             }
             connected_ = false;
             // 接收失败或连接断开时调用断连回调

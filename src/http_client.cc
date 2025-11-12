@@ -14,6 +14,14 @@ HttpClient::HttpClient(NetworkInterface* network, int connect_id) : network_(net
     event_group_handle_ = xEventGroupCreate();
 }
 
+void HttpClient::SetMaxBufferSize(size_t max_size) {
+    max_buffer_size_ = max_size;
+}
+
+void HttpClient::SetCanReceiveCallback(std::function<bool()> callback) {
+    can_receive_callback_ = callback;
+}
+
 HttpClient::~HttpClient() {
     if (connected_) {
         Close();
@@ -196,6 +204,28 @@ bool HttpClient::Open(const std::string& method, const std::string& url) {
     tcp_->OnDisconnected([this]() {
         OnTcpDisconnected();
     });
+    
+    // 设置接收限流回调
+    tcp_->OnCanReceive([this]() {
+        // 优先使用外部回调（更精确，如检查音频解码队列）
+        if (can_receive_callback_) {
+            return can_receive_callback_();
+        }
+        
+        // 如果没有外部回调，使用缓冲区大小检查
+        if (max_buffer_size_ > 0) {
+            std::lock_guard<std::mutex> read_lock(read_mutex_);
+            size_t total_size = 0;
+            for (const auto& chunk : body_chunks_) {
+                total_size += chunk.data.size();
+            }
+            // 如果缓冲区超过80%满，暂停接收
+            return total_size < max_buffer_size_ * 0.8;
+        }
+        
+        // 默认允许接收
+        return true;
+    });
     if (!tcp_->Connect(host_, port_)) {
         ESP_LOGE(TAG, "TCP connection failed");
         return false;
@@ -233,8 +263,19 @@ void HttpClient::Close() {
 void HttpClient::OnTcpData(const std::string& data) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 检查 body_chunks_ 大小，如果超过 8KB 且 heap 小于 32KB 则阻塞
-    {
+    // 如果设置了最大缓冲区大小，检查是否超过限制
+    if (max_buffer_size_ > 0) {
+        std::unique_lock<std::mutex> read_lock(read_mutex_);
+        size_t total_size = data.size();
+        for (const auto& chunk : body_chunks_) {
+            total_size += chunk.data.size();
+        }
+        // 如果超过最大缓冲区大小，等待直到有空间
+        write_cv_.wait(read_lock, [this, total_size] {
+            return total_size < max_buffer_size_ || !connected_;
+        });
+    } else {
+        // 旧逻辑：检查 body_chunks_ 大小，如果超过 8KB 且 heap 小于 32KB 则阻塞
         std::unique_lock<std::mutex> read_lock(read_mutex_);
         write_cv_.wait(read_lock, [this, size=data.size()] {
             size_t total_size = size;

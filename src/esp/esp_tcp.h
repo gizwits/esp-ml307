@@ -17,11 +17,15 @@ public:
     bool Connect(const std::string& host, int port) override;
     void Disconnect() override;
     int Send(const std::string& data) override;
+    
+    // Set receive task priority (default: 1)
+    void SetReceiveTaskPriority(unsigned int priority) override;
 
 private:
     int tcp_fd_ = -1;
     EventGroupHandle_t event_group_ = nullptr;
     TaskHandle_t receive_task_handle_ = nullptr;
+    UBaseType_t receive_task_priority_ = 1;  // Default priority
 
     void ReceiveTask();
 };

@@ -71,7 +71,7 @@ bool EspTcp::Connect(const std::string& host, int port) {
         tcp->ReceiveTask();
         xEventGroupSetBits(tcp->event_group_, ESP_TCP_EVENT_RECEIVE_TASK_EXIT);
         vTaskDelete(NULL);
-    }, "tcp_receive", 4096, this, 1, &receive_task_handle_);
+    }, "tcp_receive", 4096, this, receive_task_priority_, &receive_task_handle_);
     return true;
 }
 
@@ -87,6 +87,10 @@ void EspTcp::Disconnect() {
             ESP_LOGE(TAG, "Failed to wait for receive task exit");
         }
     }
+}
+
+void EspTcp::SetReceiveTaskPriority(unsigned int priority) {
+    receive_task_priority_ = static_cast<UBaseType_t>(priority);
 }
 
 int EspTcp::Send(const std::string& data) {

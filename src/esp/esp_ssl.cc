@@ -50,7 +50,7 @@ bool EspSsl::Connect(const std::string& host, int port) {
         ssl->ReceiveTask();
         xEventGroupSetBits(ssl->event_group_, ESP_SSL_EVENT_RECEIVE_TASK_EXIT);
         vTaskDelete(NULL);
-    }, "ssl_receive", 4096, this, 1, &receive_task_handle_);
+    }, "ssl_receive", 4096, this, receive_task_priority_, &receive_task_handle_);
     return true;
 }
 
@@ -78,6 +78,10 @@ void EspSsl::Disconnect() {
 /* CONFIG_MBEDTLS_SSL_RENEGOTIATION should be disabled in sdkconfig.
  * Otherwise, invalid memory access may be triggered.
  */
+void EspSsl::SetReceiveTaskPriority(unsigned int priority) {
+    receive_task_priority_ = static_cast<UBaseType_t>(priority);
+}
+
 int EspSsl::Send(const std::string& data) {
     if (!connected_) {
         ESP_LOGE(TAG, "Not connected");

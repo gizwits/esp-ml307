@@ -25,6 +25,12 @@ public:
         can_receive_callback_ = callback;
     }
     
+    // 设置接收任务优先级（默认空实现，子类可重写）
+    virtual void SetReceiveTaskPriority(unsigned int priority) {
+        // Default empty implementation for TCP implementations that don't support priority setting
+        (void)priority;  // Suppress unused parameter warning
+    }
+    
     // 连接状态查询
     bool connected() const { return connected_; }
 

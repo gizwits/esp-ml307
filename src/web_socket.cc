@@ -129,6 +129,9 @@ bool WebSocket::Connect(const char* uri) {
         tcp_ = network_->CreateTcp(connect_id_);
     }
 
+    // Set receive task priority to 5 for WebSocket
+    tcp_->SetReceiveTaskPriority(5);
+
     connected_ = false;
     // 使用 tcp 建立连接
     if (!tcp_->Connect(host, std::stoi(port))) {

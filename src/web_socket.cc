@@ -130,7 +130,7 @@ bool WebSocket::Connect(const char* uri) {
     }
 
     // Set receive task priority to 5 for WebSocket
-    tcp_->SetReceiveTaskPriority(5);
+    // tcp_->SetReceiveTaskPriority(5);
 
     connected_ = false;
     // 使用 tcp 建立连接

@@ -44,6 +44,7 @@ void AtUart::Initialize() {
     uart_config.data_bits = UART_DATA_8_BITS;
     uart_config.parity = UART_PARITY_DISABLE;
     uart_config.stop_bits = UART_STOP_BITS_1;
+
     uart_config.source_clk = UART_SCLK_DEFAULT;
     ESP_LOGI(TAG, "init uart ml307 %d", uart_num_);
     
@@ -66,13 +67,13 @@ void AtUart::Initialize() {
         auto ml307_at_modem = (AtUart*)arg;
         ml307_at_modem->EventTask();
         vTaskDelete(NULL);
-    }, "modem_event", 4096, this, 15, &event_task_handle_);
+    }, "modem_event", 4096 * 2, this, 15, &event_task_handle_);
 
     xTaskCreate([](void* arg) {
         auto ml307_at_modem = (AtUart*)arg;
         ml307_at_modem->ReceiveTask();
         vTaskDelete(NULL);
-    }, "modem_receive", 4096 * 2, this, 15, &receive_task_handle_);
+    }, "modem_receive", 4096 * 2, this, 10, &receive_task_handle_);
     initialized_ = true;
 }
 
@@ -84,23 +85,81 @@ void AtUart::EventTaskWrapper(void* arg) {
 
 void AtUart::EventTask() {
     uart_event_t event;
+    static uint32_t total_read_bytes = 0;
+    static uint32_t read_count = 0;
+    static uint32_t last_log_time = 0;
     while (true) {
         if (xQueueReceive(event_queue_handle_, &event, portMAX_DELAY) == pdTRUE) {
             switch (event.type)
             {
-            case UART_DATA:
-                xEventGroupSetBits(event_group_handle_, AT_EVENT_DATA_AVAILABLE);
+            case UART_DATA: {
+                // 立即读取数据，避免FIFO溢出
+                // 循环读取直到没有数据，确保快速清空硬件FIFO
+                bool has_data = false;
+                
+                while (true) {
+                    size_t available;
+                    uart_get_buffered_data_len(uart_num_, &available);
+                    if (available == 0) {
+                        break;
+                    }
+                    
+                    // 限制单次读取大小，避免阻塞
+                    size_t read_size = std::min(available, size_t(2048));
+                    
+                    // 直接读取到rx_buffer_，减少中间步骤，提高速度
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        size_t old_size = rx_buffer_.size();
+                        rx_buffer_.resize(old_size + read_size);
+                        uart_read_bytes(uart_num_, &rx_buffer_[old_size], read_size, 0);
+                    }
+                    has_data = true;
+                }
+                
+                // 如果有数据被读取，通知接收任务处理
+                if (has_data) {
+                    xEventGroupSetBits(event_group_handle_, AT_EVENT_DATA_AVAILABLE);
+                }
                 break;
+            }
             case UART_BREAK:
                 ESP_LOGI(TAG, "break");
                 break;
-            case UART_BUFFER_FULL:
-                ESP_LOGE(TAG, "buffer full");
+            case UART_BUFFER_FULL: {
+                size_t available;
+                uart_get_buffered_data_len(uart_num_, &available);
+                ESP_LOGE(TAG, "[溢出] UART buffer full! rx_buffer: %zu bytes, UART剩余: %zu bytes", 
+                         rx_buffer_.size(), available);
                 break;
-            case UART_FIFO_OVF:
-                ESP_LOGE(TAG, "FIFO overflow");
+            }
+            case UART_FIFO_OVF: {
+                // FIFO溢出是瞬时事件，可能发生在数据到达的瞬间
+                // 即使循环读取，如果数据到达太快，在两次UART_DATA事件之间也可能溢出
+                // 在溢出事件中也尝试读取剩余数据，减少数据丢失
+                size_t available;
+                uart_get_buffered_data_len(uart_num_, &available);
+                ESP_LOGW(TAG, "[溢出] FIFO overflow detected! rx_buffer: %zu bytes, UART剩余: %zu bytes", 
+                         rx_buffer_.size(), available);
+                
+                // 尝试读取剩余数据（如果有的话）
+                if (available > 0) {
+                    uint8_t temp_buf[2048];
+                    size_t read_size = std::min(available, size_t(sizeof(temp_buf)));
+                    uart_read_bytes(uart_num_, temp_buf, read_size, 0);
+                    
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    rx_buffer_.resize(rx_buffer_.size() + read_size);
+                    memcpy(&rx_buffer_[rx_buffer_.size() - read_size], temp_buf, read_size);
+                    
+                    // 通知接收任务处理数据
+                    xEventGroupSetBits(event_group_handle_, AT_EVENT_DATA_AVAILABLE);
+                    ESP_LOGW(TAG, "[溢出] 已读取 %zu bytes 剩余数据", read_size);
+                }
+                
                 HandleUrc("FIFO_OVERFLOW", {});
                 break;
+            }
             default:
                 ESP_LOGE(TAG, "unknown event type: %d", event.type);
                 break;
@@ -110,17 +169,27 @@ void AtUart::EventTask() {
 }
 
 void AtUart::ReceiveTask() {
+    static uint32_t total_parse_count = 0;
+    static uint32_t process_count = 0;
+    static uint32_t last_log_time = 0;
+    
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_handle_, AT_EVENT_DATA_AVAILABLE, pdTRUE, pdFALSE, portMAX_DELAY);
         if (bits & AT_EVENT_DATA_AVAILABLE) {
+            TickType_t process_start = xTaskGetTickCount();
+            size_t rx_buffer_before = rx_buffer_.size();
+            
+            // 限制解析次数，避免长时间阻塞
+            int parse_count = 0;
+            const int MAX_PARSE_PER_LOOP = 50;  // 每次最多解析50条响应
+            while (ParseResponse() && ++parse_count < MAX_PARSE_PER_LOOP) {}
+            
+            // 如果还有数据未处理，继续设置事件位
             size_t available;
             uart_get_buffered_data_len(uart_num_, &available);
             if (available > 0) {
-                // Extend rx_buffer_ and read into buffer
-                rx_buffer_.resize(rx_buffer_.size() + available);
-                char* rx_buffer_ptr = &rx_buffer_[rx_buffer_.size() - available];
-                uart_read_bytes(uart_num_, rx_buffer_ptr, available, portMAX_DELAY);
-                while (ParseResponse()) {}
+                ESP_LOGD(TAG, "[消费] UART还有 %zu bytes 未读，继续处理", available);
+                xEventGroupSetBits(event_group_handle_, AT_EVENT_DATA_AVAILABLE);
             }
         }
     }
@@ -131,8 +200,16 @@ static bool is_number(const std::string& s) {
 }
 
 bool AtUart::ParseResponse() {
+    // 加锁保护rx_buffer_，避免与EventTask冲突
+    std::unique_lock<std::mutex> lock(mutex_);
+    
+    if (rx_buffer_.empty()) {
+        return false;
+    }
+    
     if (wait_for_response_ && rx_buffer_[0] == '>') {
         rx_buffer_.erase(0, 1);
+        lock.unlock();  // 释放锁后再设置事件
         xEventGroupSetBits(event_group_handle_, AT_EVENT_COMMAND_DONE);
         return true;
     }
@@ -203,18 +280,22 @@ bool AtUart::ParseResponse() {
             arguments.push_back(argument);
         }
 
+        // 释放锁后再调用HandleUrc，避免死锁（HandleUrc内部也会获取mutex_）
+        lock.unlock();
         HandleUrc(command, arguments);
         return true;
     } else if (rx_buffer_.size() >= 4 && rx_buffer_[0] == 'O' && rx_buffer_[1] == 'K' && rx_buffer_[2] == '\r' && rx_buffer_[3] == '\n') {
         rx_buffer_.erase(0, 4);
+        lock.unlock();  // 释放锁后再设置事件
         xEventGroupSetBits(event_group_handle_, AT_EVENT_COMMAND_DONE);
         return true;
     } else if (rx_buffer_.size() >= 7 && rx_buffer_[0] == 'E' && rx_buffer_[1] == 'R' && rx_buffer_[2] == 'R' && rx_buffer_[3] == 'O' && rx_buffer_[4] == 'R' && rx_buffer_[5] == '\r' && rx_buffer_[6] == '\n') {
         rx_buffer_.erase(0, 7);
+        lock.unlock();  // 释放锁后再设置事件
         xEventGroupSetBits(event_group_handle_, AT_EVENT_COMMAND_ERROR);
         return true;
     } else {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // mutex_ already locked at function start
         response_ = rx_buffer_.substr(0, end_pos);
         rx_buffer_.erase(0, end_pos + 2);
         return true;

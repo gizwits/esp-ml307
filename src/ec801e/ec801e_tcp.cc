@@ -125,6 +125,8 @@ void Ec801ETcp::Disconnect() {
 
 int Ec801ETcp::Send(const std::string& data) {
     const size_t MAX_PACKET_SIZE = 1460;
+    const int MAX_RETRY_COUNT = 3;
+    const int RETRY_DELAY_MS = 10;
     size_t total_sent = 0;
 
     if (!connected_) {
@@ -138,8 +140,27 @@ int Ec801ETcp::Send(const std::string& data) {
         std::string command = "AT+QISEND=" + std::to_string(tcp_id_) + "," + std::to_string(chunk_size);
         
         // 使用原子方法发送命令和数据，避免并发问题
-        if (!at_uart_->SendCommandWithData(command, data.data() + total_sent, chunk_size)) {
-            ESP_LOGE(TAG, "Send command and data failed");
+        // 添加重试机制
+        bool send_success = false;
+        int retry_count = 0;
+        
+        while (retry_count < MAX_RETRY_COUNT) {
+            if (at_uart_->SendCommandWithData(command, data.data() + total_sent, chunk_size)) {
+                send_success = true;
+                break;
+            }
+            
+            retry_count++;
+            if (retry_count < MAX_RETRY_COUNT) {
+                ESP_LOGW(TAG, "Send command and data failed, retrying (%d/%d)...", retry_count, MAX_RETRY_COUNT);
+                vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
+            } else {
+                ESP_LOGE(TAG, "Send command and data failed after %d retries", MAX_RETRY_COUNT);
+            }
+        }
+        
+        if (!send_success) {
+            ESP_LOGE(TAG, "Send command and data failed, disconnecting");
             Disconnect();
             return -1;
         }
@@ -147,9 +168,9 @@ int Ec801ETcp::Send(const std::string& data) {
         // 等待发送完成
         auto bits = xEventGroupWaitBits(event_group_handle_, EC801E_TCP_SEND_COMPLETE | EC801E_TCP_SEND_FAILED, pdTRUE, pdFALSE, pdMS_TO_TICKS(TCP_CONNECT_TIMEOUT_MS));
         if (bits & EC801E_TCP_SEND_FAILED) {
-            ESP_LOGE(TAG, "Send failed, retry later");
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
+            ESP_LOGW(TAG, "Send failed, retrying chunk...");
+            vTaskDelay(pdMS_TO_TICKS(RETRY_DELAY_MS));
+            continue;  // 重试当前chunk
         } else if (!(bits & EC801E_TCP_SEND_COMPLETE)) {
             ESP_LOGE(TAG, "Send timeout");
             return -1;

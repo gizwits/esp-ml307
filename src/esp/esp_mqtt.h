@@ -33,6 +33,7 @@ private:
     bool connected_ = false;
     EventGroupHandle_t event_group_handle_;
     std::string message_payload_;
+    std::string message_topic_;
     esp_mqtt_client_handle_t mqtt_client_handle_ = nullptr;
 
     void MqttEventCallback(esp_event_base_t base, int32_t event_id, void *event_data);

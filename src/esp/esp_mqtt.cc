@@ -63,16 +63,28 @@ void EspMqtt::MqttEventCallback(esp_event_base_t base, int32_t event_id, void *e
         }
         break;
     case MQTT_EVENT_DATA: {
-        auto topic = std::string(event->topic, event->topic_len);
+        if (event->topic && event->topic_len > 0) {
+            message_topic_ = std::string(event->topic, event->topic_len);
+            ESP_LOGW(TAG, "MQTT event data: %s", message_topic_.c_str());
+        }
+        
         auto payload = std::string(event->data, event->data_len);
+        
         if (event->data_len == event->total_data_len) {
             if (on_message_callback_) {
-                on_message_callback_(topic, payload);
+                on_message_callback_(message_topic_, payload);
             }
+            message_topic_.clear();
+            message_payload_.clear();
         } else {
+            if (event->current_data_offset == 0) {
+                message_payload_.clear();
+            }
             message_payload_.append(payload);
+            
             if (message_payload_.size() >= event->total_data_len && on_message_callback_) {
-                on_message_callback_(topic, message_payload_);
+                on_message_callback_(message_topic_, message_payload_);
+                message_topic_.clear();
                 message_payload_.clear();
             }
         }

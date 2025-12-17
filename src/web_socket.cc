@@ -43,6 +43,7 @@ static std::string base64_encode(const unsigned char *data, size_t len) {
 
 WebSocket::WebSocket(NetworkInterface* network, int connect_id) : network_(network), connect_id_(connect_id) {
     handshake_event_group_ = xEventGroupCreate();
+    ResetFragmentState();
 }
 
 WebSocket::~WebSocket() {
@@ -168,6 +169,7 @@ bool WebSocket::Connect(const char* uri) {
             connected_ = false;
             bool was_closing = is_closing_;
             is_closing_ = false;  // 重置标志
+            ResetFragmentState();  // 重置分片状态
             if (on_disconnected_) {
                 on_disconnected_(was_closing);  // false 表示异常断开（TCP层）
             }
@@ -281,6 +283,12 @@ void WebSocket::OnError(std::function<void(int)> callback) {
     on_error_ = callback;
 }
 
+void WebSocket::ResetFragmentState() {
+    is_fragmented_ = false;
+    is_binary_ = false;
+    current_message_.clear();
+}
+
 void WebSocket::OnTcpData(const std::string& data) {
     // 将新数据追加到接收缓冲区
     receive_buffer_.append(data);
@@ -309,10 +317,6 @@ void WebSocket::OnTcpData(const std::string& data) {
     }
     
     // 处理WebSocket帧
-    static std::vector<char> current_message;
-    static bool is_fragmented = false;
-    static bool is_binary = false;
-    
     size_t buffer_offset = 0;
     const char* buffer = receive_buffer_.c_str();
     size_t buffer_size = receive_buffer_.size();
@@ -362,22 +366,23 @@ void WebSocket::OnTcpData(const std::string& data) {
             case 0x0: // 延续帧
             case 0x1: // 文本帧
             case 0x2: // 二进制帧
-                if (opcode != 0x0 && is_fragmented) {
-                    ESP_LOGE(TAG, "Received new message frame while still fragmenting");
-                    break;
+                if (opcode != 0x0 && is_fragmented_) {
+                    ESP_LOGE(TAG, "Received new message frame while still fragmenting, resetting fragment state");
+                    // 重置分片状态，丢弃之前不完整的消息，继续处理新消息
+                    ResetFragmentState();
                 }
                 if (opcode != 0x0) {
-                    is_fragmented = !fin;
-                    is_binary = (opcode == 0x2);
-                    current_message.clear();
+                    is_fragmented_ = !fin;
+                    is_binary_ = (opcode == 0x2);
+                    current_message_.clear();
                 }
-                current_message.insert(current_message.end(), payload.begin(), payload.end());
+                current_message_.insert(current_message_.end(), payload.begin(), payload.end());
                 if (fin) {
                     if (on_data_) {
-                        on_data_(current_message.data(), current_message.size(), is_binary);
+                        on_data_(current_message_.data(), current_message_.size(), is_binary_);
                     }
-                    current_message.clear();
-                    is_fragmented = false;
+                    current_message_.clear();
+                    is_fragmented_ = false;
                 }
                 break;
             case 0x8: // 关闭帧
@@ -385,6 +390,7 @@ void WebSocket::OnTcpData(const std::string& data) {
                     connected_ = false;
                     bool was_closing = is_closing_;
                     is_closing_ = false;  // 重置标志
+                    ResetFragmentState();  // 重置分片状态
                     if (on_disconnected_) {
                         on_disconnected_(true);  // true 表示正常关闭（收到关闭帧）
                     }

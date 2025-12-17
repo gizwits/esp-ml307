@@ -54,9 +54,15 @@ private:
     bool is_closing_ = false;  // 标记是否主动关闭
     size_t pong_payload_length_ = 0;
     uint8_t pong_payload_[125];
+    
+    // WebSocket 帧分片状态（用于处理分片消息）
+    std::vector<char> current_message_;
+    bool is_fragmented_ = false;
+    bool is_binary_ = false;
 
     void OnTcpData(const std::string& data);
     bool SendControlFrame(uint8_t opcode, const void* data, size_t len);
+    void ResetFragmentState();  // 重置分片状态
 };
 
 #endif // WEBSOCKET_H

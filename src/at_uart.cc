@@ -12,7 +12,7 @@
 // AtUart 构造函数实现
 AtUart::AtUart(gpio_num_t tx_pin, gpio_num_t rx_pin, gpio_num_t dtr_pin, uart_port_t uart_num)
     : tx_pin_(tx_pin), rx_pin_(rx_pin), dtr_pin_(dtr_pin), uart_num_(uart_num),
-      baud_rate_(115200), initialized_(false),
+      baud_rate_(460800), initialized_(false),
       event_task_handle_(nullptr), event_queue_handle_(nullptr), event_group_handle_(nullptr) {
 }
 

@@ -47,6 +47,13 @@ WebSocket::WebSocket(NetworkInterface* network, int connect_id) : network_(netwo
 }
 
 WebSocket::~WebSocket() {
+    // 清理pong定时器
+    if (pong_timer_ != nullptr) {
+        esp_timer_stop(pong_timer_);
+        esp_timer_delete(pong_timer_);
+        pong_timer_ = nullptr;
+    }
+    
     if (connected_) {
         tcp_->Disconnect();
     }
@@ -131,7 +138,11 @@ bool WebSocket::Connect(const char* uri) {
     }
 
     // Set receive task priority to 5 for WebSocket
-    // tcp_->SetReceiveTaskPriority(5);
+#ifdef CONFIG_IDF_TARGET_ESP32S3
+    tcp_->SetReceiveTaskPriority(5);
+#else
+    // tcp_->SetReceiveTaskPriority(1);
+#endif
 
     connected_ = false;
     // 使用 tcp 建立连接
@@ -287,6 +298,8 @@ void WebSocket::ResetFragmentState() {
     is_fragmented_ = false;
     is_binary_ = false;
     current_message_.clear();
+    // 释放vector的容量，避免内存泄漏
+    current_message_.shrink_to_fit();
 }
 
 void WebSocket::OnTcpData(const std::string& data) {
@@ -382,6 +395,10 @@ void WebSocket::OnTcpData(const std::string& data) {
                         on_data_(current_message_.data(), current_message_.size(), is_binary_);
                     }
                     current_message_.clear();
+                    // 只有当容量过大时才收缩（超过16KB）
+                    if (current_message_.capacity() > 1024 * 16) {
+                        current_message_.shrink_to_fit();
+                    }
                     is_fragmented_ = false;
                 }
                 break;
@@ -401,6 +418,14 @@ void WebSocket::OnTcpData(const std::string& data) {
 
                     // 发送 Pong - 使用延迟发送避免线程冲突
                     ESP_LOGI(TAG, "Received ping, will send pong");
+                    
+                    // 如果已有定时器在等待，先删除它
+                    if (pong_timer_ != nullptr) {
+                        esp_timer_stop(pong_timer_);
+                        esp_timer_delete(pong_timer_);
+                        pong_timer_ = nullptr;
+                    }
+                    
                     // 将 payload 复制到成员变量，供定时器回调使用
                     pong_payload_length_ = (payload_length > 125) ? 125 : payload_length;
                     if (pong_payload_length_ > 0) {
@@ -418,15 +443,20 @@ void WebSocket::OnTcpData(const std::string& data) {
                             ws->SendControlFrame(0xA, ws->pong_payload_, ws->pong_payload_length_);
 
 #endif
-
+                            // 在回调完成后删除定时器
+                            if (ws->pong_timer_ != nullptr) {
+                                esp_timer_delete(ws->pong_timer_);
+                                ws->pong_timer_ = nullptr;
+                            }
                         },
                         .arg = this,
                         .name = "pong_timer"
                     };
-                    esp_timer_handle_t timer;
-                    if (esp_timer_create(&timer_args, &timer) == ESP_OK) {
-                        esp_timer_start_once(timer, 100); // 100微秒后发送
-                        esp_timer_delete(timer);
+                    
+                    if (esp_timer_create(&timer_args, &pong_timer_) == ESP_OK) {
+                        esp_timer_start_once(pong_timer_, 100); // 100微秒后发送
+                    } else {
+                        ESP_LOGE(TAG, "Failed to create pong timer");
                     }
                 }
                 break;
@@ -444,6 +474,15 @@ void WebSocket::OnTcpData(const std::string& data) {
     // 保留未处理的数据
     if (buffer_offset > 0) {
         receive_buffer_ = receive_buffer_.substr(buffer_offset);
+        
+        // 内存优化：当容量远大于实际使用时才收缩
+        // 条件：1. 容量超过8KB 且 2. 容量是实际大小的4倍以上
+        if (receive_buffer_.capacity() > 1024 * 8 && 
+            receive_buffer_.capacity() > receive_buffer_.size() * 4) {
+            receive_buffer_.shrink_to_fit();
+            ESP_LOGD(TAG, "Shrinking receive buffer: capacity %zu -> %zu", 
+                     receive_buffer_.capacity(), receive_buffer_.size());
+        }
     }
 }
 

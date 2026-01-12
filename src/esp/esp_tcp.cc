@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <errno.h>
+#include "sdkconfig.h"  // For CONFIG_IDF_TARGET_ESP32S3
 
 static const char *TAG = "EspTcp";
 
@@ -66,12 +67,14 @@ bool EspTcp::Connect(const std::string& host, int port) {
     connected_ = true;
 
     xEventGroupClearBits(event_group_, ESP_TCP_EVENT_RECEIVE_TASK_EXIT);
+    
     xTaskCreate([](void* arg) {
         EspTcp* tcp = (EspTcp*)arg;
         tcp->ReceiveTask();
         xEventGroupSetBits(tcp->event_group_, ESP_TCP_EVENT_RECEIVE_TASK_EXIT);
         vTaskDelete(NULL);
     }, "tcp_receive", 4096, this, receive_task_priority_, &receive_task_handle_);
+    
     return true;
 }
 

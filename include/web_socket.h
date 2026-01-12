@@ -7,6 +7,7 @@
 #include <thread>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <esp_timer.h>
 
 #include "tcp.h"
 
@@ -54,6 +55,7 @@ private:
     bool is_closing_ = false;  // 标记是否主动关闭
     size_t pong_payload_length_ = 0;
     uint8_t pong_payload_[125];
+    esp_timer_handle_t pong_timer_ = nullptr;  // 用于管理pong响应的定时器
     
     // WebSocket 帧分片状态（用于处理分片消息）
     std::vector<char> current_message_;

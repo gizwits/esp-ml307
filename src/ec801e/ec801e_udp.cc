@@ -32,7 +32,7 @@ Ec801EUdp::Ec801EUdp(std::shared_ptr<AtUart> at_uart, int udp_id) : at_uart_(at_
             if (arguments[1].int_value == udp_id_) {
                 if (arguments[0].string_value == "recv" && arguments.size() >= 4) {
                     if (connected_ && message_callback_) {
-                        message_callback_(at_uart_->DecodeHex(arguments[3].string_value));
+                        message_callback_(arguments[3].string_value);
                     }
                 } else if (arguments[0].string_value == "closed") {
                     connected_ = false;
@@ -67,8 +67,8 @@ bool Ec801EUdp::Connect(const std::string& host, int port) {
     // Clear bits
     xEventGroupClearBits(event_group_handle_, EC801E_UDP_CONNECTED | EC801E_UDP_DISCONNECTED | EC801E_UDP_ERROR);
 
-    // Keep data in one line; Use HEX encoding in response
-    at_uart_->SendCommand("AT+QICFG=\"close/mode\",1;+QICFG=\"viewmode\",1;+QICFG=\"sendinfo\",1;+QICFG=\"dataformat\",0,1");
+    // Keep data in one line; Use text mode for both send and receive
+    at_uart_->SendCommand("AT+QICFG=\"close/mode\",1;+QICFG=\"viewmode\",1;+QICFG=\"sendinfo\",1;+QICFG=\"dataformat\",0,0");
 
     // 检查这个 id 是否已经连接
     std::string command = "AT+QISTATE=1," + std::to_string(udp_id_);

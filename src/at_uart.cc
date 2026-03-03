@@ -200,6 +200,9 @@ static bool is_number(const std::string& s) {
 }
 
 bool AtUart::ParseResponse() {
+    std::string command, values;
+    std::vector<AtArgumentValue> parsed_arguments;
+
     // 加锁保护rx_buffer_，避免与EventTask冲突
     std::unique_lock<std::mutex> lock(mutex_);
     
@@ -214,6 +217,166 @@ bool AtUart::ParseResponse() {
         return true;
     }
 
+    // ========== 特殊处理：+QMTRECV 基于 payload_length 精确解析 ==========
+    // 格式：+QMTRECV: <client_idx>,<msgid>,"<topic>",<payload_length>,<payload>\r\n
+    // payload 可能包含 \r\n、逗号、引号等任意字符，必须用 payload_length 定位结尾
+    if (rx_buffer_.size() >= 10 && rx_buffer_.compare(0, 10, "+QMTRECV: ") == 0) {
+        auto topic_open = rx_buffer_.find('"', 10);
+        if (topic_open != std::string::npos) {
+            auto topic_close = rx_buffer_.find('"', topic_open + 1);
+            if (topic_close == std::string::npos) return false; // topic 不完整
+
+            if (topic_close + 2 < rx_buffer_.size() && rx_buffer_[topic_close + 1] == ',') {
+                size_t len_start = topic_close + 2;
+                auto len_comma = rx_buffer_.find(',', len_start);
+                if (len_comma != std::string::npos) {
+                    std::string len_str = rx_buffer_.substr(len_start, len_comma - len_start);
+                    if (is_number(len_str)) {
+                        int payload_length = std::stoi(len_str);
+                        size_t payload_start = len_comma + 1;
+                        bool quoted = (payload_start < rx_buffer_.size() && rx_buffer_[payload_start] == '"');
+                        if (quoted) payload_start++;
+                        size_t payload_end = payload_start + payload_length;
+                        size_t line_end = payload_end + (quoted ? 1 : 0) + 2; // 闭合引号 + \r\n
+                        if (rx_buffer_.size() < line_end) return false; // 数据不完整，等
+
+                        // 解析各字段
+                        std::string header = rx_buffer_.substr(10, topic_open - 10);
+                        std::string topic = rx_buffer_.substr(topic_open + 1, topic_close - topic_open - 1);
+                        std::string payload = rx_buffer_.substr(payload_start, payload_length);
+
+                        std::istringstream hss(header);
+                        std::string h_item;
+                        while (std::getline(hss, h_item, ',')) {
+                            if (!h_item.empty() && is_number(h_item)) {
+                                AtArgumentValue arg;
+                                arg.type = AtArgumentValue::Type::Int;
+                                arg.int_value = std::stoi(h_item);
+                                parsed_arguments.push_back(arg);
+                            }
+                        }
+                        AtArgumentValue topic_arg;
+                        topic_arg.type = AtArgumentValue::Type::String;
+                        topic_arg.string_value = std::move(topic);
+                        parsed_arguments.push_back(topic_arg);
+                        AtArgumentValue len_arg;
+                        len_arg.type = AtArgumentValue::Type::Int;
+                        len_arg.int_value = payload_length;
+                        parsed_arguments.push_back(len_arg);
+                        AtArgumentValue payload_arg;
+                        payload_arg.type = AtArgumentValue::Type::String;
+                        payload_arg.string_value = std::move(payload);
+                        parsed_arguments.push_back(payload_arg);
+
+                        ESP_LOGI(TAG, "<< +QMTRECV payload_length=%d", payload_length);
+                        rx_buffer_.erase(0, line_end);
+                        command = "QMTRECV";
+                        lock.unlock();
+                        HandleUrc(command, parsed_arguments);
+                        return true;
+                    }
+                }
+            }
+        }
+        // 没有引号或没有 payload_length → 走通用解析
+    }
+
+    // ========== 特殊处理：+QIURC: "recv" 基于 data_length 精确解析（文本模式）==========
+    // 格式：+QIURC: "recv",<connect_id>,<data_length>,<raw_data>\r\n
+    // raw_data 可能包含 \r\n、逗号、引号等任意字符，必须用 data_length 定位结尾
+    if (rx_buffer_.size() >= 15 && rx_buffer_.compare(0, 15, "+QIURC: \"recv\",") == 0) {
+        auto comma1 = rx_buffer_.find(',', 15);
+        if (comma1 == std::string::npos) return false;
+        std::string id_str = rx_buffer_.substr(15, comma1 - 15);
+        if (!is_number(id_str)) return false;
+
+        auto comma2 = rx_buffer_.find(',', comma1 + 1);
+        if (comma2 == std::string::npos) return false;
+        std::string len_str = rx_buffer_.substr(comma1 + 1, comma2 - comma1 - 1);
+        if (!is_number(len_str)) return false;
+
+        int data_length = std::stoi(len_str);
+        size_t data_start = comma2 + 1;
+        size_t line_end = data_start + data_length + 2; // raw_data + \r\n
+        if (rx_buffer_.size() < line_end) return false;
+
+        int connect_id = std::stoi(id_str);
+        std::string raw_data = rx_buffer_.substr(data_start, data_length);
+
+        ESP_LOGD(TAG, "<< +QIURC: recv, id=%d, len=%d", connect_id, data_length);
+        rx_buffer_.erase(0, line_end);
+
+        AtArgumentValue arg_recv;
+        arg_recv.type = AtArgumentValue::Type::String;
+        arg_recv.string_value = "recv";
+        parsed_arguments.push_back(arg_recv);
+        AtArgumentValue arg_id;
+        arg_id.type = AtArgumentValue::Type::Int;
+        arg_id.int_value = connect_id;
+        parsed_arguments.push_back(arg_id);
+        AtArgumentValue arg_len;
+        arg_len.type = AtArgumentValue::Type::Int;
+        arg_len.int_value = data_length;
+        parsed_arguments.push_back(arg_len);
+        AtArgumentValue arg_data;
+        arg_data.type = AtArgumentValue::Type::String;
+        arg_data.string_value = std::move(raw_data);
+        parsed_arguments.push_back(arg_data);
+
+        command = "QIURC";
+        lock.unlock();
+        HandleUrc(command, parsed_arguments);
+        return true;
+    }
+
+    // ========== 特殊处理：+QSSLURC: "recv" 基于 data_length 精确解析（文本模式）==========
+    // 格式：+QSSLURC: "recv",<ssl_id>,<data_length>,<raw_data>\r\n
+    if (rx_buffer_.size() >= 17 && rx_buffer_.compare(0, 17, "+QSSLURC: \"recv\",") == 0) {
+        auto comma1 = rx_buffer_.find(',', 17);
+        if (comma1 == std::string::npos) return false;
+        std::string id_str = rx_buffer_.substr(17, comma1 - 17);
+        if (!is_number(id_str)) return false;
+
+        auto comma2 = rx_buffer_.find(',', comma1 + 1);
+        if (comma2 == std::string::npos) return false;
+        std::string len_str = rx_buffer_.substr(comma1 + 1, comma2 - comma1 - 1);
+        if (!is_number(len_str)) return false;
+
+        int data_length = std::stoi(len_str);
+        size_t data_start = comma2 + 1;
+        size_t line_end = data_start + data_length + 2; // raw_data + \r\n
+        if (rx_buffer_.size() < line_end) return false;
+
+        int ssl_id = std::stoi(id_str);
+        std::string raw_data = rx_buffer_.substr(data_start, data_length);
+
+        ESP_LOGD(TAG, "<< +QSSLURC: recv, id=%d, len=%d", ssl_id, data_length);
+        rx_buffer_.erase(0, line_end);
+
+        AtArgumentValue arg_recv;
+        arg_recv.type = AtArgumentValue::Type::String;
+        arg_recv.string_value = "recv";
+        parsed_arguments.push_back(arg_recv);
+        AtArgumentValue arg_id;
+        arg_id.type = AtArgumentValue::Type::Int;
+        arg_id.int_value = ssl_id;
+        parsed_arguments.push_back(arg_id);
+        AtArgumentValue arg_len;
+        arg_len.type = AtArgumentValue::Type::Int;
+        arg_len.int_value = data_length;
+        parsed_arguments.push_back(arg_len);
+        AtArgumentValue arg_data;
+        arg_data.type = AtArgumentValue::Type::String;
+        arg_data.string_value = std::move(raw_data);
+        parsed_arguments.push_back(arg_data);
+
+        command = "QSSLURC";
+        lock.unlock();
+        HandleUrc(command, parsed_arguments);
+        return true;
+    }
+
+    // ========== 通用解析：基于 \r\n 行分割 ==========
     auto end_pos = rx_buffer_.find("\r\n");
     if (end_pos == std::string::npos) {
         // FIXME: for +MHTTPURC: "ind", missing newline

@@ -37,7 +37,7 @@ Ec801ESsl::Ec801ESsl(std::shared_ptr<AtUart> at_uart, int ssl_id) : at_uart_(at_
             if (arguments[1].int_value == ssl_id_) {
                 if (arguments[0].string_value == "recv" && arguments.size() >= 4) {
                     if (stream_callback_) {
-                        stream_callback_(at_uart_->DecodeHex(arguments[3].string_value));
+                        stream_callback_(arguments[3].string_value);
                     }
                 } else if (arguments[0].string_value == "closed") {
                     if (connected_) {
@@ -74,8 +74,8 @@ bool Ec801ESsl::Connect(const std::string& host, int port) {
     // Clear bits
     xEventGroupClearBits(event_group_handle_, EC801E_SSL_CONNECTED | EC801E_SSL_DISCONNECTED | EC801E_SSL_ERROR);
 
-    // Keep data in one line; Use HEX encoding in response
-    at_uart_->SendCommand("AT+QICFG=\"close/mode\",1;+QICFG=\"viewmode\",1;+QICFG=\"sendinfo\",1;+QICFG=\"dataformat\",0,1");
+    // Keep data in one line; Use text mode for both send and receive
+    at_uart_->SendCommand("AT+QICFG=\"close/mode\",1;+QICFG=\"viewmode\",1;+QICFG=\"sendinfo\",1;+QICFG=\"dataformat\",0,0");
 
     // Config SSL Context
     at_uart_->SendCommand("AT+QSSLCFG=\"sslversion\",1,4;+QSSLCFG=\"ciphersuite\",1,0xFFFF;+QSSLCFG=\"seclevel\",1,0");

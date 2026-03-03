@@ -160,6 +160,41 @@ CeregState AtModem::GetRegistrationState() {
     return cereg_state_;
 }
 
+bool AtModem::SetApn(const std::string& apn, int cid, const std::string& pdp_type) {
+    std::string cmd = "AT+CGDCONT=" + std::to_string(cid) + ",\"" + pdp_type + "\",\"" + apn + "\"";
+    ESP_LOGI(TAG, "Setting APN: %s", cmd.c_str());
+    return at_uart_->SendCommand(cmd, 3000);
+}
+
+std::string AtModem::GetApn(int cid) {
+    if (!at_uart_->SendCommand("AT+CGDCONT?", 3000)) {
+        return "";
+    }
+    // Response format: +CGDCONT: <cid>,<PDP_type>,<APN>,...
+    std::string response = at_uart_->GetResponse();
+    std::string prefix = "+CGDCONT: " + std::to_string(cid) + ",";
+    size_t pos = response.find(prefix);
+    if (pos == std::string::npos) {
+        return "";
+    }
+    // Skip to APN field (after cid and PDP_type)
+    size_t type_start = pos + prefix.length();
+    // Skip PDP_type (quoted string)
+    size_t apn_start = response.find(',', type_start);
+    if (apn_start == std::string::npos) {
+        return "";
+    }
+    apn_start++; // skip comma
+    // Extract APN (quoted string)
+    if (apn_start < response.length() && response[apn_start] == '"') {
+        size_t apn_end = response.find('"', apn_start + 1);
+        if (apn_end != std::string::npos) {
+            return response.substr(apn_start + 1, apn_end - apn_start - 1);
+        }
+    }
+    return "";
+}
+
 void AtModem::HandleUrc(const std::string& command, const std::vector<AtArgumentValue>& arguments) {
     if (command == "CGSN" && arguments.size() >= 1) {
         imei_ = arguments[0].string_value;

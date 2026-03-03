@@ -71,6 +71,10 @@ public:
     std::string GetCarrierName();
     int GetCsq();
 
+    // APN 设置
+    bool SetApn(const std::string& apn, int cid = 1, const std::string& pdp_type = "IP");
+    std::string GetApn(int cid = 1);
+
     // 状态查询
     bool pin_ready() const { return pin_ready_; }
     bool network_ready() const { return network_ready_; }

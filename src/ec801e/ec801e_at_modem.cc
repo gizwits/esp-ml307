@@ -21,6 +21,10 @@ Ec801EAtModem::Ec801EAtModem(std::shared_ptr<AtUart> at_uart) : AtModem(at_uart)
     at_uart_->SendCommand("ATE0");
     // 设置 URC 端口为 UART1
     at_uart_->SendCommand("AT+QURCCFG=\"urcport\",\"uart1\"");
+    // 清理上次 ESP32 重启前可能残留的 MQTT 连接
+    // 必须在此处（Ec801EMqtt 创建之前）执行，避免 close 触发的 URC 被 MQTT 回调处理导致崩溃
+    at_uart_->SendCommand("AT+QMTCLOSE=0");
+    vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 void Ec801EAtModem::HandleUrc(const std::string& command, const std::vector<AtArgumentValue>& arguments) {

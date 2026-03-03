@@ -7,30 +7,14 @@ Ec801EMqtt::Ec801EMqtt(std::shared_ptr<AtUart> at_uart, int mqtt_id) : at_uart_(
     event_group_handle_ = xEventGroupCreate();
 
     urc_callback_it_ = at_uart_->RegisterUrcCallback([this](const std::string& command, const std::vector<AtArgumentValue>& arguments) {
-        if (command == "QMTRECV" && arguments.size() >= 4 && arguments[0].int_value == mqtt_id_) {
-            // 基于 payload_length 的精确解析（字符串模式）
-            // 参数格式：client_idx(Int), msgid(Int), topic(String), payload_length(Int), payload(String)
-            if (arguments.size() >= 5 && arguments[3].type == AtArgumentValue::Type::Int) {
-                auto& topic = arguments[2].string_value;
-                auto& payload = arguments[4].string_value;
-                int expected_len = arguments[3].int_value;
-                ESP_LOGI(TAG, "QMTRECV topic=%s, payload_length=%d, actual=%d",
-                         topic.c_str(), expected_len, (int)payload.size());
-                if ((int)payload.size() != expected_len) {
-                    ESP_LOGE(TAG, "QMTRECV payload size mismatch! expected=%d, got=%d", expected_len, (int)payload.size());
-                }
+        if (command == "QMTRECV" && arguments.size() >= 4) {
+            if (arguments[0].int_value == mqtt_id_) {
+                auto topic = arguments[2].string_value;
                 if (on_message_callback_) {
-                    on_message_callback_(topic, payload);
+                    on_message_callback_(topic, at_uart_->DecodeHex(arguments[3].string_value));
                 }
             }
-            // 兼容通用解析的旧格式（无 payload_length，可能 HEX）
-            else if (arguments[3].type == AtArgumentValue::Type::String) {
-                auto& topic = arguments[2].string_value;
-                if (on_message_callback_) {
-                    on_message_callback_(topic, arguments[3].string_value);
-                }
-            }
-        } else if (command == "QMTSTAT" && arguments.size() >= 2) {
+        } else if (command == "QMTSTAT" && arguments.size() == 1) {
             if (arguments[0].int_value == mqtt_id_) {
                 ESP_LOGI(TAG, "MQTT connection state: %s", ErrorToString(arguments[1].int_value).c_str());
             }
@@ -72,18 +56,17 @@ Ec801EMqtt::~Ec801EMqtt() {
 bool Ec801EMqtt::Connect(const std::string broker_address, int broker_port, const std::string client_id, const std::string username, const std::string password) {
     EventBits_t bits;
     
-    // 残留 MQTT 连接已在 Ec801EAtModem 初始化阶段清理（AT+QMTCLOSE）
-    // 此处如果已连接则主动断开
-    if (connected_) {
-        std::string close_command = "AT+QMTCLOSE=" + std::to_string(mqtt_id_);
-        if (!at_uart_->SendCommand(close_command)) {
-            ESP_LOGW(TAG, "Failed to close previous MQTT connection, but continue...");
-        } else {
-            ESP_LOGI(TAG, "Previous MQTT connection closed successfully");
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-        connected_ = false;
+    // 首先关闭之前的 MQTT 连接，确保状态干净
+    // 存在一种情况是模组重启
+    std::string close_command = "AT+QMTCLOSE=" + std::to_string(mqtt_id_);
+    if (!at_uart_->SendCommand(close_command)) {
+        ESP_LOGW(TAG, "Failed to close previous MQTT connection, but continue...");
+    } else {
+        ESP_LOGI(TAG, "Previous MQTT connection closed successfully");
     }
+    
+    // 等待一小段时间确保关闭操作完成
+    vTaskDelay(pdMS_TO_TICKS(100));
     
     // if (IsConnected()) {
     //     // 断开之前的连接
@@ -122,15 +105,10 @@ bool Ec801EMqtt::Connect(const std::string broker_address, int broker_port, cons
         return false;
     }
 
-    // 字符串模式收发（数据量比 HEX 模式小一半）
-    if (!at_uart_->SendCommand("AT+QMTCFG=\"dataformat\"," + std::to_string(mqtt_id_) + ",0,0")) {
-        ESP_LOGE(TAG, "Failed to set MQTT dataformat");
+    // Set HEX encoding (ASCII for sending, HEX for receiving)
+    if (!at_uart_->SendCommand("AT+QMTCFG=\"dataformat\"," + std::to_string(mqtt_id_) + ",0,1")) {
+        ESP_LOGE(TAG, "Failed to set MQTT to use HEX encoding");
         return false;
-    }
-
-    // 自动推送 + 启用 payload_length（用于精确按长度解析 payload）
-    if (!at_uart_->SendCommand("AT+QMTCFG=\"recv/mode\"," + std::to_string(mqtt_id_) + ",0,1")) {
-        ESP_LOGW(TAG, "Failed to set recv/mode with payload_length");
     }
 
     std::string command = "AT+QMTOPEN=" + std::to_string(mqtt_id_) + ",\"" + broker_address + "\"," + std::to_string(broker_port);
@@ -211,7 +189,7 @@ bool Ec801EMqtt::Publish(const std::string topic, const std::string payload, int
     command += std::to_string(payload.size());
     
     // 使用原子方法发送命令和数据，避免并发问题
-    return at_uart_->SendCommandWithData(command, 1000, true, payload.data(), payload.size());
+    return at_uart_->SendCommandWithData(command, payload.data(), payload.size());
 }
 
 bool Ec801EMqtt::Subscribe(const std::string topic, int qos) {

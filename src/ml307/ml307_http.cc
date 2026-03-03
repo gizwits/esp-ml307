@@ -104,8 +104,8 @@ int Ml307Http::Write(const char* buffer, size_t buffer_size) {
         return 0;
     }
     std::string command = "AT+MHTTPCONTENT=" + std::to_string(http_id_) + ",1," + std::to_string(buffer_size);
-    // 使用原子方法发送命令和数据，避免并发问题
-    at_uart_->SendCommandWithData(command, 1000, true, buffer, buffer_size);
+    at_uart_->SendCommand(command);
+    at_uart_->SendCommand(std::string(buffer, buffer_size));
     return buffer_size;
 }
 
@@ -224,8 +224,8 @@ bool Ml307Http::Open(const std::string& method, const std::string& url) {
 
     if (method_supports_content && content_.has_value()) {
         command = "AT+MHTTPCONTENT=" + std::to_string(http_id_) + ",0," + std::to_string(content_.value().size());
-        // 使用原子方法发送命令和数据，避免并发问题
-        at_uart_->SendCommandWithData(command, 1000, true, content_.value().data(), content_.value().size());
+        at_uart_->SendCommand(command);
+        at_uart_->SendCommand(content_.value());
         content_ = std::nullopt;
     }
 

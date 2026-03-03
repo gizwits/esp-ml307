@@ -145,7 +145,7 @@ int Ec801ETcp::Send(const std::string& data) {
         int retry_count = 0;
         
         while (retry_count < MAX_RETRY_COUNT) {
-            if (at_uart_->SendCommandWithData(command, 1000, true, data.data() + total_sent, chunk_size)) {
+            if (at_uart_->SendCommandWithData(command, data.data() + total_sent, chunk_size)) {
                 send_success = true;
                 break;
             }

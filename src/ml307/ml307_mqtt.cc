@@ -142,9 +142,10 @@ bool Ml307Mqtt::Publish(const std::string topic, const std::string payload, int 
     std::string command = "AT+MQTTPUB=" + std::to_string(mqtt_id_) + ",\"" + topic + "\",";
     command += std::to_string(qos) + ",0,0,";
     command += std::to_string(payload.size());
-
-    // 使用原子方法发送命令和数据，避免并发问题
-    return at_uart_->SendCommandWithData(command, 1000, true, payload.data(), payload.size());
+    if (!at_uart_->SendCommand(command)) {
+        return false;
+    }
+    return at_uart_->SendCommand(payload);
 }
 
 bool Ml307Mqtt::Subscribe(const std::string topic, int qos) {

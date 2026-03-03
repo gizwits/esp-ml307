@@ -125,7 +125,7 @@ int Ec801EUdp::Send(const std::string& data) {
     std::string command = "AT+QISEND=" + std::to_string(udp_id_) + "," + std::to_string(data.size());
     
     // 使用原子方法发送命令和数据，避免并发问题
-    if (!at_uart_->SendCommandWithData(command, 1000, true, data.data(), data.size())) {
+    if (!at_uart_->SendCommandWithData(command, data.data(), data.size())) {
         ESP_LOGE(TAG, "Failed to send command and data");
         return -1;
     }

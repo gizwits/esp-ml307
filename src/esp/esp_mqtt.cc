@@ -52,6 +52,9 @@ void EspMqtt::MqttEventCallback(esp_event_base_t base, int32_t event_id, void *e
     case MQTT_EVENT_CONNECTED:
         connected_ = true;
         xEventGroupSetBits(event_group_handle_, MQTT_CONNECTED_EVENT);
+        if (on_connected_callback_) {                                                                                           
+            on_connected_callback_();                                                                                           
+        }
         break;
     case MQTT_EVENT_DISCONNECTED:
         connected_ = false;
@@ -116,7 +119,7 @@ bool EspMqtt::Publish(const std::string topic, const std::string payload, int qo
     if (!connected_) {
         return false;
     }
-    return esp_mqtt_client_publish(mqtt_client_handle_, topic.c_str(), payload.data(), payload.size(), qos, 0) == 0;
+    return esp_mqtt_client_publish(mqtt_client_handle_, topic.c_str(), payload.data(), payload.size(), qos, 0) >= 0;
 }
 
 bool EspMqtt::Subscribe(const std::string topic, int qos) {

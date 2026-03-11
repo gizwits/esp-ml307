@@ -14,6 +14,9 @@ Ml307Mqtt::Ml307Mqtt(std::shared_ptr<AtUart> at_uart, int mqtt_id) : at_uart_(at
                     if (arguments[2].int_value == 0) {
                         connected_ = true;
                         xEventGroupSetBits(event_group_handle_, MQTT_CONNECTED_EVENT);
+                        if (on_connected_callback_) {
+                            on_connected_callback_();
+                        }
                     } else {
                         if (connected_) {
                             connected_ = false;

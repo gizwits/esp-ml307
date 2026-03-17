@@ -402,14 +402,21 @@ void HttpClient::ProcessReceivedData() {
                     chunk_received_ += available;
 
                     if (chunk_received_ == chunk_size_) {
-                        // 跳过 chunk 后的 CRLF
-                        if (rx_buffer_.size() >= 2 && rx_buffer_.substr(0, 2) == "\r\n") {
-                            rx_buffer_.erase(0, 2);
-                        }
-                        parse_state_ = ParseState::CHUNK_SIZE;
+                        // 跳过 chunk 后的 CRLF，如果 CRLF 还没到则等待下次数据
+                        parse_state_ = ParseState::CHUNK_CRLF;
                     }
                 }
                 if (available == 0) return;  // 需要更多数据
+                break;
+            }
+
+            case ParseState::CHUNK_CRLF: {
+                // 等待 chunk 数据后的 CRLF
+                if (rx_buffer_.size() < 2) return;  // 需要更多数据
+                if (rx_buffer_[0] == '\r' && rx_buffer_[1] == '\n') {
+                    rx_buffer_.erase(0, 2);
+                }
+                parse_state_ = ParseState::CHUNK_SIZE;
                 break;
             }
 

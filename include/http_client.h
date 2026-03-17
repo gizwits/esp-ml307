@@ -127,6 +127,7 @@ private:
         BODY,
         CHUNK_SIZE,
         CHUNK_DATA,
+        CHUNK_CRLF,
         CHUNK_TRAILER,
         COMPLETE
     };

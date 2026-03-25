@@ -29,7 +29,7 @@ std::unique_ptr<AtModem> AtModem::Detect(gpio_num_t tx_pin, gpio_num_t rx_pin, g
     ESP_LOGI(TAG, "Detected modem: %s", response.c_str());
     
     // 检查响应中的模组型号
-    if (response.find("EC801E") == 0) {
+    if (response.find("EC801E") == 0 || response.find("EG800AK") == 0) {
         return std::make_unique<Ec801EAtModem>(uart);
     } else if (response.find("NT26K") == 0) {
         return std::make_unique<Ec801EAtModem>(uart);

@@ -8,6 +8,15 @@
 #include <functional>
 #include <mutex>
 #include <memory>
+
+struct GnssLocation {
+    double latitude = 0.0;   // 十进制度，南纬为负
+    double longitude = 0.0;  // 十进制度，西经为负
+    double altitude = 0.0;   // 海拔（米）
+    bool valid = false;
+};
+
+using GnssCallback = std::function<void(bool success, const GnssLocation& location)>;
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -74,6 +83,10 @@ public:
     // APN 设置
     bool SetApn(const std::string& apn, int cid = 1, const std::string& pdp_type = "IP");
     std::string GetApn(int cid = 1);
+
+    // GNSS 定位（默认不支持，子类按需实现）
+    // timeout_seconds: 搜星超时秒数，callback(false, {}) 表示不支持或超时
+    virtual void GetGnssLocation(GnssCallback callback, int timeout_seconds = 300);
 
     // 状态查询
     bool pin_ready() const { return pin_ready_; }

@@ -76,6 +76,11 @@ bool AtModem::SetSleepMode(bool enable, int delay_seconds) {
     return false;
 }
 
+void AtModem::GetGnssLocation(GnssCallback callback, int timeout_seconds) {
+    // 基类默认不支持，子类按需实现
+    callback(false, GnssLocation{});
+}
+
 NetworkStatus AtModem::WaitForNetworkReady(int timeout_ms) {
     ESP_LOGI(TAG, "Waiting for network ready...");
     network_ready_ = false;

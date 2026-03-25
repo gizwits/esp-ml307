@@ -10,6 +10,9 @@ public:
 
     bool SetSleepMode(bool enable, int delay_seconds=0) override;
 
+    // GNSS 定位（使用 Quectel AT+QGPS* 指令）
+    void GetGnssLocation(GnssCallback callback, int timeout_seconds = 300) override;
+
     // 实现基类的纯虚函数
     std::unique_ptr<Http> CreateHttp(int connect_id) override;
     std::unique_ptr<Tcp> CreateTcp(int connect_id) override;

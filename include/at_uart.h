@@ -55,7 +55,9 @@ public:
     ~AtUart();
 
     // 初始化和配置
-    void Initialize();
+    // rx_buf_size: UART RX ring buffer 大小（4G 用 8192，GNSS-only 用 2048）
+    // task_stack:  收发任务 stack 大小（4G 用 8192，GNSS-only 用 3072）
+    void Initialize(size_t rx_buf_size = 8192, size_t task_stack = 8192);
     
     // 波特率管理
     bool SetBaudRate(int new_baud_rate);

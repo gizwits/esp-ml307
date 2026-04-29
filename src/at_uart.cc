@@ -28,11 +28,11 @@ AtUart::~AtUart() {
     }
 }
 
-void AtUart::Initialize() {
+void AtUart::Initialize(size_t rx_buf_size, size_t task_stack) {
     if (initialized_) {
         return;
     }
-    
+
     event_group_handle_ = xEventGroupCreate();
     if (!event_group_handle_) {
         ESP_LOGE(TAG, "创建事件组失败");
@@ -44,14 +44,14 @@ void AtUart::Initialize() {
     uart_config.data_bits = UART_DATA_8_BITS;
     uart_config.parity = UART_PARITY_DISABLE;
     uart_config.stop_bits = UART_STOP_BITS_1;
-
     uart_config.source_clk = UART_SCLK_DEFAULT;
-    ESP_LOGI(TAG, "init uart ml307 %d", uart_num_);
-    
-    ESP_ERROR_CHECK(uart_driver_install(uart_num_, 8192, 0, 100, &event_queue_handle_, ESP_INTR_FLAG_IRAM));
+
+    ESP_LOGI(TAG, "init uart %d, rx_buf=%zu, task_stack=%zu", uart_num_, rx_buf_size, task_stack);
+
+    ESP_ERROR_CHECK(uart_driver_install(uart_num_, rx_buf_size, 0, 20, &event_queue_handle_, ESP_INTR_FLAG_IRAM));
     ESP_ERROR_CHECK(uart_param_config(uart_num_, &uart_config));
     ESP_ERROR_CHECK(uart_set_pin(uart_num_, tx_pin_, rx_pin_, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-    
+
     if (dtr_pin_ != GPIO_NUM_NC) {
         gpio_config_t config = {};
         config.pin_bit_mask = (1ULL << dtr_pin_);
@@ -67,13 +67,13 @@ void AtUart::Initialize() {
         auto ml307_at_modem = (AtUart*)arg;
         ml307_at_modem->EventTask();
         vTaskDelete(NULL);
-    }, "modem_event", 4096 * 2, this, 15, &event_task_handle_);
+    }, "modem_event", task_stack, this, 15, &event_task_handle_);
 
     xTaskCreate([](void* arg) {
         auto ml307_at_modem = (AtUart*)arg;
         ml307_at_modem->ReceiveTask();
         vTaskDelete(NULL);
-    }, "modem_receive", 4096 * 2, this, 10, &receive_task_handle_);
+    }, "modem_receive", task_stack, this, 10, &receive_task_handle_);
     initialized_ = true;
 }
 

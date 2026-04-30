@@ -3,6 +3,7 @@ idf_component_register(
         "src/at_uart.cc"
         "src/at_modem.cc"
         "src/ec801e/ec801e_at_modem.cc"
+        "src/ec801e/ec801e_gnss.cc"
         "src/ec801e/ec801e_tcp.cc"
         "src/ec801e/ec801e_ssl.cc"
         "src/ec801e/ec801e_udp.cc"

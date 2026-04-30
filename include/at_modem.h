@@ -13,7 +13,12 @@ struct GnssLocation {
     double latitude = 0.0;   // 十进制度，南纬为负
     double longitude = 0.0;  // 十进制度，西经为负
     double altitude = 0.0;   // 海拔（米）
-    bool valid = false;
+    bool valid = false;      // true=QGPSLOC确认，false=RMC降级
+    // 诊断字段（从 GSV/GSA 解析）
+    int satellites_visible = 0;  // GSV numSV：可见卫星总数
+    int satellites_used = 0;     // GSA 非空 PRN 数：参与定位的卫星数
+    float hdop = 0.0f;           // 水平精度因子（越小越好）
+    float pdop = 0.0f;           // 综合精度因子
 };
 
 using GnssCallback = std::function<void(bool success, const GnssLocation& location)>;

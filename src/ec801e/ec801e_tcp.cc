@@ -17,6 +17,7 @@ Ec801ETcp::Ec801ETcp(std::shared_ptr<AtUart> at_uart, int tcp_id) : at_uart_(at_
                     xEventGroupClearBits(event_group_handle_, EC801E_TCP_DISCONNECTED | EC801E_TCP_ERROR);
                     xEventGroupSetBits(event_group_handle_, EC801E_TCP_CONNECTED);
                 } else {
+                    ESP_LOGE(TAG, "QIOPEN error code: %d (id=%d)", arguments[1].int_value, tcp_id_);
                     connected_ = false;
                     xEventGroupSetBits(event_group_handle_, EC801E_TCP_ERROR);
                     if (disconnect_callback_) {
@@ -41,7 +42,6 @@ Ec801ETcp::Ec801ETcp(std::shared_ptr<AtUart> at_uart, int tcp_id) : at_uart_(at_
                 } else if (arguments[0].string_value == "closed") {
                     if (connected_) {
                         connected_ = false;
-                        // instance_active_ 保持 true，需要发送 QICLOSE 清理
                         if (disconnect_callback_) {
                             disconnect_callback_();
                         }
@@ -79,19 +79,14 @@ bool Ec801ETcp::Connect(const std::string& host, int port) {
     // Keep data in one line; Use text mode for both send and receive
     at_uart_->SendCommand("AT+QICFG=\"close/mode\",1;+QICFG=\"viewmode\",1;+QICFG=\"sendinfo\",1;+QICFG=\"dataformat\",0,0");
 
-    // 检查这个 id 是否已经连接
-    std::string command = "AT+QISTATE=1," + std::to_string(tcp_id_);
-    at_uart_->SendCommand(command);
+    // 无条件关闭，确保模块侧 ID 空闲（忽略返回值）
+    at_uart_->SendCommand("AT+QICLOSE=" + std::to_string(tcp_id_));
+    xEventGroupWaitBits(event_group_handle_, EC801E_TCP_DISCONNECTED, pdTRUE, pdFALSE, pdMS_TO_TICKS(2000));
+    instance_active_ = false;
 
-    // 断开之前的连接（不触发回调事件）
-    if (instance_active_) {
-        at_uart_->SendCommand("AT+QICLOSE=" + std::to_string(tcp_id_));
-        xEventGroupWaitBits(event_group_handle_, EC801E_TCP_DISCONNECTED, pdTRUE, pdFALSE, TCP_CONNECT_TIMEOUT_MS / portTICK_PERIOD_MS);
-        instance_active_ = false;
-    }
-
-    // 打开 TCP 连接
-    command = "AT+QIOPEN=1," + std::to_string(tcp_id_) + ",\"TCP\",\"" + host + "\"," + std::to_string(port) + ",0,1";
+    // 打开 TCP 连接（access_mode=1 直接推送模式）
+    std::string command = "AT+QIOPEN=1," + std::to_string(tcp_id_) + ",\"TCP\",\"" + host + "\"," + std::to_string(port) + ",0,1";
+    ESP_LOGI(TAG, "Sending: %s", command.c_str());
     if (!at_uart_->SendCommand(command)) {
         ESP_LOGE(TAG, "Failed to open TCP connection");
         return false;
@@ -101,6 +96,10 @@ bool Ec801ETcp::Connect(const std::string& host, int port) {
     auto bits = xEventGroupWaitBits(event_group_handle_, EC801E_TCP_CONNECTED | EC801E_TCP_ERROR, pdTRUE, pdFALSE, TCP_CONNECT_TIMEOUT_MS / portTICK_PERIOD_MS);
     if (bits & EC801E_TCP_ERROR) {
         ESP_LOGE(TAG, "Failed to connect to %s:%d", host.c_str(), port);
+        return false;
+    }
+    if (!(bits & EC801E_TCP_CONNECTED)) {
+        ESP_LOGE(TAG, "Connect timeout to %s:%d", host.c_str(), port);
         return false;
     }
     return true;

@@ -17,6 +17,7 @@ Ec801ESsl::Ec801ESsl(std::shared_ptr<AtUart> at_uart, int ssl_id) : at_uart_(at_
                     xEventGroupClearBits(event_group_handle_, EC801E_SSL_DISCONNECTED | EC801E_SSL_ERROR);
                     xEventGroupSetBits(event_group_handle_, EC801E_SSL_CONNECTED);
                 } else {
+                    ESP_LOGE(TAG, "QSSLOPEN error code: %d (id=%d)", arguments[1].int_value, ssl_id_);
                     connected_ = false;
                     xEventGroupSetBits(event_group_handle_, EC801E_SSL_ERROR);
                 }
@@ -81,19 +82,14 @@ bool Ec801ESsl::Connect(const std::string& host, int port) {
     at_uart_->SendCommand("AT+QSSLCFG=\"sslversion\",1,4;+QSSLCFG=\"ciphersuite\",1,0xFFFF;+QSSLCFG=\"seclevel\",1,0");
     // at_uart_->SendCommand("AT+QSSLCFG=\"cacert\",1,\"UFS:cacert.pem\"");
 
-    // 检查这个 id 是否已经连接
-    std::string command = "AT+QSSLSTATE=1," + std::to_string(ssl_id_);
-    at_uart_->SendCommand(command);
-
-    // 断开之前的连接（不触发回调事件）
-    if (instance_active_) {
-        at_uart_->SendCommand("AT+QSSLCLOSE=" + std::to_string(ssl_id_));
-        xEventGroupWaitBits(event_group_handle_, EC801E_SSL_DISCONNECTED, pdTRUE, pdFALSE, SSL_CONNECT_TIMEOUT_MS / portTICK_PERIOD_MS);
-        instance_active_ = false;
-    }
+    // 无条件关闭，确保模块侧 ID 空闲（忽略返回值）
+    at_uart_->SendCommand("AT+QSSLCLOSE=" + std::to_string(ssl_id_));
+    xEventGroupWaitBits(event_group_handle_, EC801E_SSL_DISCONNECTED, pdTRUE, pdFALSE, pdMS_TO_TICKS(2000));
+    instance_active_ = false;
 
     // 打开 TCP 连接
-    command = "AT+QSSLOPEN=1,1," + std::to_string(ssl_id_) + ",\"" + host + "\"," + std::to_string(port) + ",1";
+    std::string command = "AT+QSSLOPEN=1,1," + std::to_string(ssl_id_) + ",\"" + host + "\"," + std::to_string(port) + ",1";
+    ESP_LOGI(TAG, "Sending: %s", command.c_str());
     if (!at_uart_->SendCommand(command)) {
         ESP_LOGE(TAG, "Failed to open TCP connection");
         return false;
@@ -103,6 +99,10 @@ bool Ec801ESsl::Connect(const std::string& host, int port) {
     auto bits = xEventGroupWaitBits(event_group_handle_, EC801E_SSL_CONNECTED | EC801E_SSL_ERROR, pdTRUE, pdFALSE, SSL_CONNECT_TIMEOUT_MS / portTICK_PERIOD_MS);
     if (bits & EC801E_SSL_ERROR) {
         ESP_LOGE(TAG, "Failed to connect to %s:%d", host.c_str(), port);
+        return false;
+    }
+    if (!(bits & EC801E_SSL_CONNECTED)) {
+        ESP_LOGE(TAG, "Connect timeout to %s:%d", host.c_str(), port);
         return false;
     }
     return true;

@@ -1,5 +1,6 @@
 #include "ec801e_gnss.h"
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <cstdlib>
 #include <cstring>
 
@@ -129,6 +130,14 @@ void Ec801ERunGnssTask(std::shared_ptr<AtUart> at_uart, GnssCallback callback, i
             vTaskDelay(pdMS_TO_TICKS(10000));
             elapsed += 10;
 
+            // 非阻塞预占AT通道：如果此刻MQTT/HTTP等数据通信正占用通道，直接跳过本轮，
+            // 避免GPS轮询和数据通信互相阻塞（GPS轮询优先级更低，可以晚一轮再查）
+            if (!at_uart->TryLockChannel(300)) {
+                ESP_LOGW(TAG, "[GNSS] AT通道繁忙（数据通信占用中），跳过本轮查询 %d/%d 秒", elapsed, timeout_seconds);
+                continue;
+            }
+            int64_t round_start_us = esp_timer_get_time();
+
             // 先查 GSV/GSA 收集诊断数据，必须在 QGPSLOC 之前，否则 QGPSLOC 一旦成功
             // 设置 got_fix=true 后就不会再查 NMEA，导致卫星数永远为 0
             {
@@ -185,6 +194,10 @@ void Ec801ERunGnssTask(std::shared_ptr<AtUart> at_uart, GnssCallback callback, i
                     ESP_LOGW(TAG, "[GNSS] 搜星中... %d/%d 秒（QGPSLOC CME错误码: %d）", elapsed, timeout_seconds, loc_cme);
                 }
             }
+
+            int64_t round_ms = (esp_timer_get_time() - round_start_us) / 1000;
+            ESP_LOGD(TAG, "[GNSS] 本轮查询耗时 %lld ms", (long long)round_ms);
+            at_uart->UnlockChannel();
         }
 
         // 与 Wi-Fi 模式对齐：只在本次开启时才关闭 GNSS

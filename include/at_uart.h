@@ -70,6 +70,12 @@ public:
     bool SendCommandWithData(const std::string& command, const char* data, size_t data_length, size_t timeout_ms = 1000);
     const std::string& GetResponse() const { return response_; }
     int GetCmeErrorCode() const { return cme_error_code_; }
+
+    // 非阻塞地预占命令通道：低优先级的轮询任务（如 GNSS）可用它在通道被占用
+    // 时直接跳过本轮，而不是阻塞等待，避免和 MQTT/HTTP 等数据通信互相卡顿。
+    // 成功后需配对调用 UnlockChannel()；期间该线程内的 SendCommand 调用可正常重入。
+    bool TryLockChannel(uint32_t timeout_ms);
+    void UnlockChannel();
     
     // 回调管理
     std::list<UrcCallback>::iterator RegisterUrcCallback(UrcCallback callback);
@@ -95,7 +101,9 @@ private:
     int cme_error_code_ = 0;
     std::string response_;
     bool wait_for_response_ = false;
-    std::mutex command_mutex_;
+    // recursive: TryLockChannel()/UnlockChannel() 可跨多条 SendCommand 预占通道，
+    // timed: 支持 GNSS 等低优先级轮询做非阻塞的“忙则跳过”判断
+    std::recursive_timed_mutex command_mutex_;
     std::mutex mutex_;
     
     // FreeRTOS 对象

@@ -1,12 +1,16 @@
 #include "at_uart.h"
 #include <esp_log.h>
 #include <esp_err.h>
+#include <esp_timer.h>
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <sstream>
+#include <chrono>
 
 #define TAG "AtUart"
+// 通道等待超过该阈值视为明显排队/竞争，打印告警辅助定位 GPS/数据通信互相卡顿的问题
+#define CHANNEL_CONTENTION_WARN_US 150000
 
 
 // AtUart 构造函数实现
@@ -541,8 +545,14 @@ bool AtUart::SendData(const char* data, size_t length) {
 }
 
 bool AtUart::SendCommand(const std::string& command, size_t timeout_ms, bool add_crlf) {
+    int64_t t_request = esp_timer_get_time();
+    std::lock_guard<std::recursive_timed_mutex> lock(command_mutex_);
+    int64_t wait_us = esp_timer_get_time() - t_request;
+    if (wait_us > CHANNEL_CONTENTION_WARN_US) {
+        // 通道被别的命令占用了较长时间才轮到本条，常见于 GPS 轮询与 MQTT/HTTP 数据通信抢占同一 AT 通道
+        ESP_LOGW(TAG, "[通道] \"%.32s\" 排队等待通道 %lld ms", command.c_str(), (long long)(wait_us / 1000));
+    }
 
-    std::lock_guard<std::mutex> lock(command_mutex_);
     xEventGroupClearBits(event_group_handle_, AT_EVENT_COMMAND_DONE | AT_EVENT_COMMAND_ERROR);
     wait_for_response_ = true;
     cme_error_code_ = 0;
@@ -559,9 +569,16 @@ bool AtUart::SendCommand(const std::string& command, size_t timeout_ms, bool add
         }
     }
     if (timeout_ms > 0) {
+        int64_t t_sent = esp_timer_get_time();
         auto bits = xEventGroupWaitBits(event_group_handle_, AT_EVENT_COMMAND_DONE | AT_EVENT_COMMAND_ERROR, pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
         wait_for_response_ = false;
-        return bits & AT_EVENT_COMMAND_DONE;
+        bool ok = bits & AT_EVENT_COMMAND_DONE;
+        if (!ok) {
+            int64_t elapsed_ms = (esp_timer_get_time() - t_sent) / 1000;
+            ESP_LOGW(TAG, "[无响应] \"%.32s\" 等待 %lld ms 未收到OK (limit=%zums, CME=%d)",
+                     command.c_str(), (long long)elapsed_ms, timeout_ms, cme_error_code_);
+        }
+        return ok;
     } else {
         wait_for_response_ = false;
     }
@@ -569,40 +586,64 @@ bool AtUart::SendCommand(const std::string& command, size_t timeout_ms, bool add
 }
 
 bool AtUart::SendCommandWithData(const std::string& command, const char* data, size_t data_length, size_t timeout_ms) {
-    std::lock_guard<std::mutex> lock(command_mutex_);
+    int64_t t_request = esp_timer_get_time();
+    std::lock_guard<std::recursive_timed_mutex> lock(command_mutex_);
+    int64_t wait_us = esp_timer_get_time() - t_request;
+    if (wait_us > CHANNEL_CONTENTION_WARN_US) {
+        ESP_LOGW(TAG, "[通道] \"%.32s\"(带数据) 排队等待通道 %lld ms", command.c_str(), (long long)(wait_us / 1000));
+    }
+
     xEventGroupClearBits(event_group_handle_, AT_EVENT_COMMAND_DONE | AT_EVENT_COMMAND_ERROR);
     wait_for_response_ = true;
     cme_error_code_ = 0;
     response_.clear();
-    
+
     // 原子性地发送命令和数据
     if (!SendData((command + "\r\n").data(), command.length() + 2)) {
         wait_for_response_ = false;
         return false;
     }
-    
+
     // 等待命令响应（通常是 ">" 提示符）
+    int64_t t_sent = esp_timer_get_time();
     auto bits = xEventGroupWaitBits(event_group_handle_, AT_EVENT_COMMAND_DONE | AT_EVENT_COMMAND_ERROR, pdTRUE, pdFALSE, pdMS_TO_TICKS(5000));
     if (!(bits & AT_EVENT_COMMAND_DONE)) {
         wait_for_response_ = false;
+        ESP_LOGW(TAG, "[无响应] \"%.32s\" 等待 %lld ms 未收到\">\"提示符 (CME=%d)",
+                 command.c_str(), (long long)((esp_timer_get_time() - t_sent) / 1000), cme_error_code_);
         return false;
     }
-    
+
     // 发送数据
     if (!SendData(data, data_length)) {
         wait_for_response_ = false;
         return false;
     }
-    
+
     // 等待最终响应
     if (timeout_ms > 0) {
+        int64_t t_data_sent = esp_timer_get_time();
         bits = xEventGroupWaitBits(event_group_handle_, AT_EVENT_COMMAND_DONE | AT_EVENT_COMMAND_ERROR, pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
         wait_for_response_ = false;
-        return bits & AT_EVENT_COMMAND_DONE;
+        bool ok = bits & AT_EVENT_COMMAND_DONE;
+        if (!ok) {
+            ESP_LOGW(TAG, "[无响应] \"%.32s\" 发送数据(%zuB)后等待 %lld ms 未收到最终OK (limit=%zums, CME=%d)",
+                     command.c_str(), data_length, (long long)((esp_timer_get_time() - t_data_sent) / 1000),
+                     timeout_ms, cme_error_code_);
+        }
+        return ok;
     } else {
         wait_for_response_ = false;
     }
     return true;
+}
+
+bool AtUart::TryLockChannel(uint32_t timeout_ms) {
+    return command_mutex_.try_lock_for(std::chrono::milliseconds(timeout_ms));
+}
+
+void AtUart::UnlockChannel() {
+    command_mutex_.unlock();
 }
 
 std::list<UrcCallback>::iterator AtUart::RegisterUrcCallback(UrcCallback callback) {

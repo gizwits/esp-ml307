@@ -311,10 +311,19 @@ void HttpClient::OnTcpDisconnected() {
 }
 
 void HttpClient::ProcessReceivedData() {
+    // 所有 substr()/erase() 调用都先经过 npos 检查或使用固定的 0 位置，
+    // 不会越界抛出 std::out_of_range；Content-Length/chunk size 用 strtoul
+    // 解析，不使用会抛异常的 std::stoi 系列函数。
     while (!rx_buffer_.empty() && parse_state_ != ParseState::COMPLETE) {
         switch (parse_state_) {
             case ParseState::STATUS_LINE: {
-                if (!HasCompleteLine(rx_buffer_)) return;  // 需要更多数据
+                if (!HasCompleteLine(rx_buffer_)) {
+                    if (rx_buffer_.size() > MAX_LINE_SIZE) {
+                        ESP_LOGE(TAG, "Status line too long (%u bytes) without CRLF, protocol error", (unsigned)rx_buffer_.size());
+                        SetError();
+                    }
+                    return;  // 需要更多数据
+                }
 
                 std::string line = GetNextLine(rx_buffer_);
 
@@ -328,7 +337,13 @@ void HttpClient::ProcessReceivedData() {
             }
 
             case ParseState::HEADERS: {
-                if (!HasCompleteLine(rx_buffer_)) return;  // 需要更多数据
+                if (!HasCompleteLine(rx_buffer_)) {
+                    if (rx_buffer_.size() > MAX_LINE_SIZE) {
+                        ESP_LOGE(TAG, "Header line too long (%u bytes) without CRLF, protocol error", (unsigned)rx_buffer_.size());
+                        SetError();
+                    }
+                    return;  // 需要更多数据
+                }
 
                 std::string line = GetNextLine(rx_buffer_);
 
@@ -377,7 +392,13 @@ void HttpClient::ProcessReceivedData() {
             }
 
             case ParseState::CHUNK_SIZE: {
-                if (!HasCompleteLine(rx_buffer_)) return;  // 需要更多数据
+                if (!HasCompleteLine(rx_buffer_)) {
+                    if (rx_buffer_.size() > MAX_LINE_SIZE) {
+                        ESP_LOGE(TAG, "Chunk size line too long (%u bytes) without CRLF, protocol error", (unsigned)rx_buffer_.size());
+                        SetError();
+                    }
+                    return;  // 需要更多数据
+                }
 
                 std::string line = GetNextLine(rx_buffer_);
 
@@ -421,7 +442,13 @@ void HttpClient::ProcessReceivedData() {
             }
 
             case ParseState::CHUNK_TRAILER: {
-                if (!HasCompleteLine(rx_buffer_)) return;  // 需要更多数据
+                if (!HasCompleteLine(rx_buffer_)) {
+                    if (rx_buffer_.size() > MAX_LINE_SIZE) {
+                        ESP_LOGE(TAG, "Chunk trailer line too long (%u bytes) without CRLF, protocol error", (unsigned)rx_buffer_.size());
+                        SetError();
+                    }
+                    return;  // 需要更多数据
+                }
 
                 std::string line = GetNextLine(rx_buffer_);
 

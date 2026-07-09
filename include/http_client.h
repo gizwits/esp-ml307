@@ -95,6 +95,9 @@ private:
     std::deque<DataChunk> body_chunks_;
     std::condition_variable write_cv_;
     const size_t MAX_BODY_CHUNKS_SIZE = 8192;
+    // 状态行/头部行/chunk 大小行的最大长度，超过此长度仍未找到 CRLF 视为协议错误
+    // 避免把畸形或错位的数据当成一整个超长 token 去解析，触发 std::string 扩容异常导致 abort()
+    const size_t MAX_LINE_SIZE = 8192;
     
     int status_code_ = -1;
     int timeout_ms_ = 30000;

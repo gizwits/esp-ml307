@@ -193,14 +193,15 @@ void Ec801ERunGnssTask(std::shared_ptr<AtUart> at_uart, GnssCallback callback, i
         };
 
         int elapsed = 0;
-        while (elapsed < timeout_seconds && !got_fix) {
+        // timeout_seconds <= 0 表示不超时：上电后持续搜星直到定位成功，期间 GNSS 保持开启
+        while ((timeout_seconds <= 0 || elapsed < timeout_seconds) && !got_fix) {
             vTaskDelay(pdMS_TO_TICKS(10000));
             elapsed += 10;
 
             // 非阻塞预占AT通道：如果此刻MQTT/HTTP等数据通信正占用通道，直接跳过本轮，
             // 避免GPS轮询和数据通信互相阻塞（GPS轮询优先级更低，可以晚一轮再查）
             if (!at_uart->TryLockChannel(300)) {
-                ESP_LOGW(TAG, "[GNSS] AT通道繁忙（数据通信占用中），跳过本轮查询 %d/%d 秒", elapsed, timeout_seconds);
+                ESP_LOGW(TAG, "[GNSS] AT通道繁忙（数据通信占用中），跳过本轮查询（已搜索%d秒）", elapsed);
                 continue;
             }
             int64_t round_start_us = esp_timer_get_time();
@@ -256,9 +257,9 @@ void Ec801ERunGnssTask(std::shared_ptr<AtUart> at_uart, GnssCallback callback, i
                 at_uart->UnregisterUrcCallback(rmc_urc);
 
                 if (loc_ok) {
-                    ESP_LOGI(TAG, "[GNSS] 搜星中... %d/%d 秒（已收到QGPSLOC响应但未固定）", elapsed, timeout_seconds);
+                    ESP_LOGI(TAG, "[GNSS] 搜星中... 已%d秒（已收到QGPSLOC响应但未固定）", elapsed);
                 } else {
-                    ESP_LOGW(TAG, "[GNSS] 搜星中... %d/%d 秒（QGPSLOC CME错误码: %d）", elapsed, timeout_seconds, loc_cme);
+                    ESP_LOGW(TAG, "[GNSS] 搜星中... 已%d秒（QGPSLOC CME错误码: %d）", elapsed, loc_cme);
                 }
             }
 
@@ -592,7 +593,8 @@ void Ec801EGnss::GetGnssLocation(GnssCallback callback, int timeout_seconds) {
             }
         };
 
-        while (elapsed < timeout_sec && !got_fix) {
+        // timeout_sec <= 0 表示不超时：上电后持续搜星直到定位成功，期间 GNSS 保持开启
+        while ((timeout_sec <= 0 || elapsed < timeout_sec) && !got_fix) {
             vTaskDelay(pdMS_TO_TICKS(10000));
             elapsed += 10;
 
@@ -704,11 +706,11 @@ void Ec801EGnss::GetGnssLocation(GnssCallback callback, int timeout_seconds) {
             }
 
             if (loc_has_response) {
-                ESP_LOGI(TAG, "[GNSS] 搜星中... %d/%d 秒（已收到QGPSLOC响应但未固定）", elapsed, timeout_sec);
+                ESP_LOGI(TAG, "[GNSS] 搜星中... 已%d秒（已收到QGPSLOC响应但未固定）", elapsed);
             } else if (loc_cme_error) {
-                ESP_LOGW(TAG, "[GNSS] 搜星中... %d/%d 秒（QGPSLOC CME错误码: %d）", elapsed, timeout_sec, cme_code);
+                ESP_LOGW(TAG, "[GNSS] 搜星中... 已%d秒（QGPSLOC CME错误码: %d）", elapsed, cme_code);
             } else if (!got_fix) {
-                ESP_LOGW(TAG, "[GNSS] 搜星中... %d/%d 秒（QGPSLOC无有效响应）", elapsed, timeout_sec);
+                ESP_LOGW(TAG, "[GNSS] 搜星中... 已%d秒（QGPSLOC无有效响应）", elapsed);
             }
         }
 

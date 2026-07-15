@@ -12,6 +12,7 @@
 class Ec801EGnss {
 public:
     Ec801EGnss(gpio_num_t tx_pin, gpio_num_t rx_pin, uart_port_t uart_num = UART_NUM_1);
+    // timeout_seconds <= 0 表示不超时：持续搜星直到定位成功（GNSS 保持开启，不反复开关）
     void GetGnssLocation(GnssCallback callback, int timeout_seconds = 300);
 
 private:

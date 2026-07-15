@@ -62,13 +62,8 @@ void Ec801ERunGnssTask(std::shared_ptr<AtUart> at_uart, GnssCallback callback, i
                 }
             });
 
-        // 与 Wi-Fi 模式对齐：配置 NMEA 类型、星系、nmeasrc、AP-Flash 热启动
-        at_uart->SendCommand("AT+QGPSCFG=\"gpsnmeatype\",31", 1000);  // GGA+RMC+GSV+GSA+VTG
-        at_uart->SendCommand("AT+QGPSCFG=\"gnssconfig\",1", 1000);    // GPS+BDS
-        at_uart->SendCommand("AT+QGPSCFG=\"nmeasrc\",1", 1000);
-        at_uart->SendCommand("AT+QGPSCFG=\"apflash\",1", 1000);       // 关闭时保存星历，下次热启动
-
-        // 检查 GNSS 是否已开启，避免重复开启报错
+        // 检查 GNSS 是否已开启：gnssconfig 等参数需在 GNSS 停止时配置才能生效，
+        // 若上一轮任务异常退出导致 GNSS 未关闭，这里先关闭，避免 QGPSCFG 写入被拒(CME 501)
         volatile bool gnss_already_on = false;
         {
             auto status_urc = at_uart->RegisterUrcCallback(
@@ -80,10 +75,82 @@ void Ec801ERunGnssTask(std::shared_ptr<AtUart> at_uart, GnssCallback callback, i
             at_uart->SendCommand("AT+QGPS?", 1000);
             at_uart->UnregisterUrcCallback(status_urc);
         }
-
         if (gnss_already_on) {
-            ESP_LOGI(TAG, "[GNSS] GNSS已开启，继续搜星");
-        } else if (at_uart->SendCommand("AT+QGPS=1", 3000)) {
+            ESP_LOGI(TAG, "[GNSS] 检测到GNSS已开启，先关闭以便重新配置星系");
+            if (at_uart->SendCommand("AT+QGPS=0", 2000)) {
+                ESP_LOGI(TAG, "[GNSS] AT+QGPS=0 成功");
+            } else {
+                ESP_LOGW(TAG, "[GNSS] AT+QGPS=0 失败 (CME:%d)", at_uart->GetCmeErrorCode());
+            }
+            // GNSS 引擎停止不是瞬时的，紧接着写星系配置容易被拒(CME 501)，留出停止时间
+            vTaskDelay(pdMS_TO_TICKS(500));
+            gnss_already_on = false;
+        }
+
+        // gnssconfig 配置成功后会自动保存至NVRAM，重复写入同一固件在此已被观察到会返回CME 501，
+        // 所以先查询当前值，只在与目标不一致时才写入，避免每次开机都触发这个错误
+        {
+            std::string current_value;
+            auto cfg_urc = at_uart->RegisterUrcCallback(
+                [&current_value](const std::string& cmd, const std::vector<AtArgumentValue>& args) {
+                    if (cmd != "QGPSCFG" || args.size() < 2) return;
+                    current_value = args[1].string_value;
+                });
+            at_uart->SendCommand("AT+QGPSCFG=\"gnssconfig\"", 1000);
+            at_uart->UnregisterUrcCallback(cfg_urc);
+
+            if (current_value == "7") {
+                ESP_LOGI(TAG, "[GNSS] gnssconfig已是7(BDS)，跳过重复写入");
+            } else if (!at_uart->SendCommand("AT+QGPSCFG=\"gnssconfig\",7", 1000)) {  // 仅BDS（模组不支持GPS）
+                ESP_LOGW(TAG, "[GNSS] AT+QGPSCFG=\"gnssconfig\",7 失败 (CME:%d，当前值:%s)",
+                         at_uart->GetCmeErrorCode(), current_value.c_str());
+            }
+        }
+
+        // 与 Wi-Fi 模式对齐：配置 NMEA 类型、nmeasrc、AP-Flash 热启动
+        at_uart->SendCommand("AT+QGPSCFG=\"gpsnmeatype\",31", 1000);  // GGA+RMC+GSV+GSA+VTG
+        at_uart->SendCommand("AT+QGPSCFG=\"nmeasrc\",1", 1000);
+        if (at_uart->SendCommand("AT+QGPSCFG=\"apflash\",1", 1000)) {  // 关闭时保存星历，下次热启动
+            ESP_LOGI(TAG, "[GNSS] AT+QGPSCFG=\"apflash\",1 成功，AP-Flash已启用");
+        } else {
+            ESP_LOGW(TAG, "[GNSS] AT+QGPSCFG=\"apflash\",1 失败 (CME:%d)", at_uart->GetCmeErrorCode());
+        }
+        if (!at_uart->SendCommand("AT+QGPSVBCKP=0", 1000)) {           // 无备电硬件，禁用备电依赖，纯靠AP-Flash
+            ESP_LOGW(TAG, "[GNSS] AT+QGPSVBCKP=0 失败 (CME:%d)，该型号可能不支持此命令", at_uart->GetCmeErrorCode());
+        }
+
+        // 诊断：整体查询一遍GNSS配置，确认apflash等参数实际落地的值
+        {
+            std::string cfg_dump;
+            auto cfg_dump_urc = at_uart->RegisterUrcCallback(
+                [&cfg_dump](const std::string& cmd, const std::vector<AtArgumentValue>& args) {
+                    if (cmd != "QGPSCFG" || args.empty()) return;
+                    if (!cfg_dump.empty()) cfg_dump += " | ";
+                    for (size_t i = 0; i < args.size(); i++) {
+                        if (i > 0) cfg_dump += ',';
+                        cfg_dump += args[i].string_value;
+                    }
+                });
+            at_uart->SendCommand("AT+QGPSCFG?", 1000);
+            at_uart->UnregisterUrcCallback(cfg_dump_urc);
+            ESP_LOGI(TAG, "[诊断] 当前GNSS配置: %s", cfg_dump.c_str());
+        }
+
+        // AGNSS 需要先有一路激活的 PDP 场景，否则 AT+QAGPS=1 会静默不生效（手册 2.3.6 备注1）。
+        // 若其他连接（如MQTT）已激活过 PDP，这里会返回 ERROR(CME=0)，属正常，无需当作失败处理
+        if (at_uart->SendCommand("AT+QIACT=1", 5000)) {
+            ESP_LOGI(TAG, "[GNSS] AT+QIACT=1 成功，PDP场景已激活");
+        } else {
+            ESP_LOGI(TAG, "[GNSS] AT+QIACT=1 未返回OK (CME:%d)，可能是PDP场景已被其他连接激活，忽略",
+                     at_uart->GetCmeErrorCode());
+        }
+        if (at_uart->SendCommand("AT+QAGPS=1", 3000)) {                // 启用AGNSS，加快首次定位
+            ESP_LOGI(TAG, "[GNSS] AT+QAGPS=1 成功，AGNSS已启用");
+        } else {
+            ESP_LOGW(TAG, "[GNSS] AT+QAGPS=1 失败 (CME:%d)", at_uart->GetCmeErrorCode());
+        }
+
+        if (at_uart->SendCommand("AT+QGPS=1", 3000)) {
             ESP_LOGI(TAG, "[GNSS] AT+QGPS=1 成功，开始搜星");
         } else {
             ESP_LOGW(TAG, "[GNSS] AT+QGPS=1 失败 (CME:%d)", at_uart->GetCmeErrorCode());
@@ -200,10 +267,8 @@ void Ec801ERunGnssTask(std::shared_ptr<AtUart> at_uart, GnssCallback callback, i
             at_uart->UnlockChannel();
         }
 
-        // 与 Wi-Fi 模式对齐：只在本次开启时才关闭 GNSS
-        if (!gnss_already_on) {
-            at_uart->SendCommand("AT+QGPS=0", 2000);
-        }
+        // 本次任务总是自己开启的 GNSS（见上方：已开启则先关闭再重配星系），所以退出时统一关闭
+        at_uart->SendCommand("AT+QGPS=0", 2000);
         at_uart->UnregisterUrcCallback(urc_cb);
 
         if (got_fix) {
@@ -332,23 +397,6 @@ void Ec801EGnss::GetGnssLocation(GnssCallback callback, int timeout_seconds) {
         int detected_baud = detect_baud_rate(port);
         ESP_LOGI(TAG, "使用波特率: %d", detected_baud);
 
-        // 初始化模组并配置GNSS
-        static const char* const init_cmds[] = {
-            "ATE0\r\n",
-            "AT+QURCCFG=\"urcport\",\"uart1\"\r\n",
-            "AT+QGPSCFG=\"gpsnmeatype\",31\r\n",  // GGA+RMC+GSV+GSA+VTG
-            "AT+QGPSCFG=\"gnssconfig\",1\r\n",   // GPS+BDS
-            "AT+QGPSCFG=\"nmeasrc\",1\r\n",      // 允许通过AT+QGPSGNMEA获取NMEA语句
-            // AP-Flash: GNSS关闭时自动保存星历到Flash（有效期1小时），下次启动为热启动(TTFF<5s)
-            "AT+QGPSCFG=\"apflash\",1\r\n",
-        };
-        char flush[64];
-        for (auto cmd : init_cmds) {
-            uart_write_bytes(port, cmd, strlen(cmd));
-            vTaskDelay(pdMS_TO_TICKS(300));
-            while (uart_read_bytes(port, (uint8_t*)flush, sizeof(flush), pdMS_TO_TICKS(100)) > 0) {}
-        }
-
         // 检查模组通信
         const char* ate = "ATE0\r\n";
         uart_write_bytes(port, ate, strlen(ate));
@@ -368,6 +416,68 @@ void Ec801EGnss::GetGnssLocation(GnssCallback callback, int timeout_seconds) {
             ESP_LOGE(TAG, "ATE0 无响应，请检查 UART 引脚或模组供电");
         }
 
+        // 查询GNSS是否已开启：gnssconfig 等参数需在 GNSS 停止时配置才能生效，
+        // 若上一轮任务异常退出导致 GNSS 未关闭，这里先关闭，避免 QGPSCFG 写入被拒(CME 501)
+        {
+            const char* query_status = "AT+QGPS?\r\n";
+            uart_write_bytes(port, query_status, strlen(query_status));
+            vTaskDelay(pdMS_TO_TICKS(300));
+            bool gnss_on = false;
+            while (gnss_read_line(port, line, sizeof(line), 200) > 0) {
+                if (strncmp(line, "+QGPS:", 6) == 0) {
+                    ESP_LOGI(TAG, "[诊断] GNSS状态: %s", line);
+                    if (strstr(line, ",1") != nullptr) gnss_on = true;
+                }
+            }
+            if (gnss_on) {
+                ESP_LOGI(TAG, "[GNSS] 检测到GNSS已开启，先关闭以便重新配置星系");
+                const char* qgps_off = "AT+QGPS=0\r\n";
+                uart_write_bytes(port, qgps_off, strlen(qgps_off));
+                vTaskDelay(pdMS_TO_TICKS(500));
+                while (gnss_read_line(port, line, sizeof(line), 200) > 0) {}
+            }
+        }
+
+        // gnssconfig 配置成功后会自动保存至NVRAM，重复写入同一固件已被观察到会返回CME 501，
+        // 所以先查询当前值，只在与目标不一致时才写入，避免每次开机都触发这个错误
+        {
+            const char* query_gnssconfig = "AT+QGPSCFG=\"gnssconfig\"\r\n";
+            uart_write_bytes(port, query_gnssconfig, strlen(query_gnssconfig));
+            vTaskDelay(pdMS_TO_TICKS(300));
+            bool already_bds = false;
+            while (gnss_read_line(port, line, sizeof(line), 200) > 0) {
+                if (strncmp(line, "+QGPSCFG:", 9) == 0 && strstr(line, ",7") != nullptr) {
+                    already_bds = true;
+                }
+            }
+            if (already_bds) {
+                ESP_LOGI(TAG, "[GNSS] gnssconfig已是7(BDS)，跳过重复写入");
+            } else {
+                const char* set_gnssconfig = "AT+QGPSCFG=\"gnssconfig\",7\r\n";  // 仅BDS（模组不支持GPS）
+                uart_write_bytes(port, set_gnssconfig, strlen(set_gnssconfig));
+                vTaskDelay(pdMS_TO_TICKS(300));
+                while (gnss_read_line(port, line, sizeof(line), 200) > 0) {}
+            }
+        }
+
+        // 初始化模组并配置GNSS
+        static const char* const init_cmds[] = {
+            "ATE0\r\n",
+            "AT+QURCCFG=\"urcport\",\"uart1\"\r\n",
+            "AT+QGPSCFG=\"gpsnmeatype\",31\r\n",  // GGA+RMC+GSV+GSA+VTG
+            "AT+QGPSCFG=\"nmeasrc\",1\r\n",      // 允许通过AT+QGPSGNMEA获取NMEA语句
+            // AP-Flash: GNSS关闭时自动保存星历到Flash（有效期1小时），下次启动为热启动(TTFF<5s)
+            "AT+QGPSCFG=\"apflash\",1\r\n",
+            // 无备电硬件，禁用备电依赖，纯靠AP-Flash；该命令不保存NVRAM，每次开GNSS前都需重新下发
+            "AT+QGPSVBCKP=0\r\n",
+        };
+        char flush[64];
+        for (auto cmd : init_cmds) {
+            uart_write_bytes(port, cmd, strlen(cmd));
+            vTaskDelay(pdMS_TO_TICKS(300));
+            while (uart_read_bytes(port, (uint8_t*)flush, sizeof(flush), pdMS_TO_TICKS(100)) > 0) {}
+        }
+
         // 查询GNSS配置状态
         ESP_LOGI(TAG, "[诊断] 查询GNSS配置...");
         const char* query_cfg = "AT+QGPSCFG?\r\n";
@@ -379,23 +489,49 @@ void Ec801EGnss::GetGnssLocation(GnssCallback callback, int timeout_seconds) {
             }
         }
 
-        // 查询GNSS是否已开启
-        const char* query_status = "AT+QGPS?\r\n";
-        uart_write_bytes(port, query_status, strlen(query_status));
-        vTaskDelay(pdMS_TO_TICKS(300));
-        bool gnss_already_on = false;
-        while (gnss_read_line(port, line, sizeof(line), 200) > 0) {
-            if (strncmp(line, "+QGPS:", 6) == 0) {
-                ESP_LOGI(TAG, "[诊断] GNSS状态: %s", line);
-                if (strstr(line, ",1") != nullptr) {
-                    gnss_already_on = true;
+        // AGNSS 需要先有一路激活的 PDP 场景，否则 AT+QAGPS=1 会静默不生效（手册 2.3.6 备注1）
+        {
+            const char* qiact = "AT+QIACT=1\r\n";
+            uart_write_bytes(port, qiact, strlen(qiact));
+            TickType_t qiact_end = xTaskGetTickCount() + pdMS_TO_TICKS(5000);
+            bool qiact_ok = false;
+            while (xTaskGetTickCount() < qiact_end) {
+                if (gnss_read_line(port, line, sizeof(line), 300) > 0) {
+                    if (strncmp(line, "OK", 2) == 0) { qiact_ok = true; break; }
+                    if (strncmp(line, "ERROR", 5) == 0 || strncmp(line, "+CME ERROR:", 11) == 0) break;
                 }
+            }
+            ESP_LOGI(TAG, "[GNSS] AT+QIACT=1 %s", qiact_ok ? "成功，PDP场景已激活" : "未返回OK，可能是PDP场景已被其他连接激活，忽略");
+        }
+
+        // 启用 AGNSS
+        {
+            const char* qagps_on = "AT+QAGPS=1\r\n";
+            uart_write_bytes(port, qagps_on, strlen(qagps_on));
+            TickType_t qagps_end = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
+            bool qagps_ok = false;
+            while (xTaskGetTickCount() < qagps_end) {
+                if (gnss_read_line(port, line, sizeof(line), 300) > 0) {
+                    if (strncmp(line, "OK", 2) == 0) { qagps_ok = true; break; }
+                    if (strncmp(line, "ERROR", 5) == 0 || strncmp(line, "+CME ERROR:", 11) == 0) break;
+                }
+            }
+            ESP_LOGI(TAG, "[GNSS] AT+QAGPS=1 %s", qagps_ok ? "成功，AGNSS已启用" : "失败");
+        }
+
+        // 查询AGNSS状态
+        const char* query_agnss = "AT+QAGPS?\r\n";
+        uart_write_bytes(port, query_agnss, strlen(query_agnss));
+        vTaskDelay(pdMS_TO_TICKS(300));
+        while (gnss_read_line(port, line, sizeof(line), 200) > 0) {
+            if (strncmp(line, "+QAGPS:", 7) == 0) {
+                ESP_LOGI(TAG, "[诊断] AGNSS状态: %s", line);
             }
         }
 
-        // 开启 GNSS（如果尚未开启）
-        bool gps_started = gnss_already_on;
-        if (!gnss_already_on) {
+        // 开启 GNSS（上面已确保开始时是关闭状态）
+        bool gps_started = false;
+        {
             const char* qgps_on = "AT+QGPS=1\r\n";
             uart_write_bytes(port, qgps_on, strlen(qgps_on));
             TickType_t gps_end = xTaskGetTickCount() + pdMS_TO_TICKS(3000);
@@ -406,8 +542,6 @@ void Ec801EGnss::GetGnssLocation(GnssCallback callback, int timeout_seconds) {
                 }
             }
             ESP_LOGI(TAG, "[GNSS] AT+QGPS=1 %s", gps_started ? "成功，开始搜星" : "失败");
-        } else {
-            ESP_LOGI(TAG, "[GNSS] GNSS已开启，继续搜星");
         }
 
         GnssLocation location;
@@ -578,12 +712,10 @@ void Ec801EGnss::GetGnssLocation(GnssCallback callback, int timeout_seconds) {
             }
         }
 
-        // 仅在本函数开启GNSS时才关闭，避免影响外部状态
-        if (!gnss_already_on) {
-            const char* qgps_off = "AT+QGPS=0\r\n";
-            uart_write_bytes(port, qgps_off, strlen(qgps_off));
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
+        // 本次任务总是自己开启的 GNSS（见上方：已开启则先关闭再重配星系），所以退出时统一关闭
+        const char* qgps_off = "AT+QGPS=0\r\n";
+        uart_write_bytes(port, qgps_off, strlen(qgps_off));
+        vTaskDelay(pdMS_TO_TICKS(200));
         uart_driver_delete(port);
 
         if (got_fix) {

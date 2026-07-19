@@ -53,10 +53,17 @@ WebSocket::~WebSocket() {
         esp_timer_delete(pong_timer_);
         pong_timer_ = nullptr;
     }
-    
-    if (connected_) {
-        tcp_->Disconnect();
-    }
+
+    // 必须在其他成员析构前无条件销毁传输层，不能只在 connected_ 时 Disconnect：
+    // WS 层收到对端 close 帧后 connected_ 已置 false，但底层 TCP 仍然活着，
+    // 服务器仍在下发的数据会经 stream_callback_ 写入本对象的 receive_buffer_ 等成员。
+    // tcp_ 是最先声明的成员、默认最后析构——那时 receive_buffer_/on_data_/
+    // current_message_ 已被释放，晚到的数据包会写进已释放的堆内存
+    // （PSRAM TLSF 空闲链表被踩、block_locate_free/block_next 断言崩溃的真因）。
+    // 先 reset：Ec801ETcp 析构会 QICLOSE 并反注册 URC（AtUart 持锁等待飞行中回调结束），
+    // EspTcp 析构会 close(fd) 并等待接收任务退出；之后其余成员才能安全析构。
+    tcp_.reset();
+
     if (handshake_event_group_) {
         vEventGroupDelete(handshake_event_group_);
     }

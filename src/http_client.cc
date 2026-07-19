@@ -144,14 +144,9 @@ std::string HttpClient::BuildHttpRequest() {
 
     // 结束头部
     request << "\r\n";
-    ESP_LOGD(TAG, "HTTP request headers:\n%s", request.str().c_str());
-
-    // 请求体
-    if (has_content) {
-        request << *content_;
-    }
-
-    return request.str();
+    std::string headers = request.str();
+    ESP_LOGD(TAG, "HTTP request headers:\n%s", headers.c_str());
+    return headers;
 }
 
 bool HttpClient::Open(const std::string& method, const std::string& url) {
@@ -241,6 +236,14 @@ bool HttpClient::Open(const std::string& method, const std::string& url) {
         tcp_->Disconnect();
         connected_ = false;
         return false;
+    }
+    if (content_.has_value() && !content_->empty()) {
+        if (tcp_->Send(*content_) <= 0) {
+            ESP_LOGE(TAG, "Send HTTP content failed");
+            tcp_->Disconnect();
+            connected_ = false;
+            return false;
+        }
     }
 
     return true;

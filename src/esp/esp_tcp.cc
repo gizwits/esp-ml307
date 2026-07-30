@@ -163,7 +163,14 @@ void EspTcp::ReceiveTask() {
                     vTaskDelay(pdMS_TO_TICKS(10));
                     continue;
                 }
-                ESP_LOGE(TAG, "TCP receive failed: %d", errno);
+                // Disconnect() 从另一线程 close(fd) 时，阻塞中的 recv() 会以
+                // ENOTCONN(128) 返回——这是主动关闭的预期路径，不是故障。
+                // 若仍按 ERROR 打日志，会掩盖真正的堆/网络问题，并被误当成 PSRAM 元凶。
+                if (!connected_ || errno == ENOTCONN || errno == EINTR) {
+                    ESP_LOGD(TAG, "TCP receive exit on close: errno=%d", errno);
+                } else {
+                    ESP_LOGE(TAG, "TCP receive failed: %d", errno);
+                }
             }
             connected_ = false;
             // 接收失败或连接断开时调用断连回调

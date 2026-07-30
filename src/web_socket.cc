@@ -310,6 +310,13 @@ void WebSocket::ResetFragmentState() {
 }
 
 void WebSocket::OnTcpData(const std::string& data) {
+    // WS 层已关闭（收到 close 帧或主动 Close）后，底层 TCP 可能仍有尾包。
+    // 若继续 append/解析并回调 on_data_，会与上层 CloseAudioChannel 的清理并发，
+    // 把音频包推进已拆除的队列——这是析构 tcp_.reset() 修掉 UAF 之后仍可能踩堆的路径。
+    if (handshake_completed_ && !connected_) {
+        return;
+    }
+
     // 将新数据追加到接收缓冲区
     receive_buffer_.append(data);
     
@@ -418,8 +425,10 @@ void WebSocket::OnTcpData(const std::string& data) {
                     if (on_disconnected_) {
                         on_disconnected_(true);  // true 表示正常关闭（收到关闭帧）
                     }
+                    // close 帧之后同 TCP 段里可能还有尾数据，一律丢弃，避免再进 on_data_
+                    receive_buffer_.clear();
+                    return;
                 }
-                break;
             case 0x9: // Ping
                 {
 

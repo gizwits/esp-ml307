@@ -6,6 +6,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <mutex>
 #include <string>
 
 #define ML307_TCP_CONNECTED BIT0
@@ -15,6 +16,8 @@
 #define ML307_TCP_INITIALIZED BIT5
 
 #define TCP_CONNECT_TIMEOUT_MS 10000
+// Keep streaming sends below the application's 5-second task watchdog.
+#define ML307_TCP_SEND_TIMEOUT_MS 1500
 
 class Ml307Tcp : public Tcp {
 public:
@@ -31,6 +34,9 @@ protected:
     bool instance_active_ = false;
     EventGroupHandle_t event_group_handle_;
     std::list<UrcCallback>::iterator urc_callback_it_;
+    // AtUart serializes only the initial command response, not the asynchronous
+    // +MIPSEND confirmation. Protect the complete transaction here.
+    std::mutex send_mutex_;
     
     // 虚函数允许子类自定义SSL配置
     virtual bool ConfigureSsl(int port);

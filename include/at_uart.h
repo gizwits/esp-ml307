@@ -76,6 +76,12 @@ public:
     // 成功后需配对调用 UnlockChannel()；期间该线程内的 SendCommand 调用可正常重入。
     bool TryLockChannel(uint32_t timeout_ms);
     void UnlockChannel();
+    // Network sends from either UART worker would wait for responses that these
+    // same workers are responsible for receiving/parsing.
+    bool IsInUartTask() const {
+        TaskHandle_t current = xTaskGetCurrentTaskHandle();
+        return current == event_task_handle_ || current == receive_task_handle_;
+    }
     
     // 回调管理
     std::list<UrcCallback>::iterator RegisterUrcCallback(UrcCallback callback);

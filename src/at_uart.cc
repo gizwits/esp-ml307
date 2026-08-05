@@ -485,8 +485,15 @@ void AtUart::HandleUrc(const std::string& command, const std::vector<AtArgumentV
         return;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& callback : urc_callbacks_) {
+    // Never invoke external callbacks while holding the RX-buffer/callback-list
+    // mutex. Snapshot the callbacks so UART event handling can continue buffering
+    // response bytes while application callbacks run.
+    std::list<UrcCallback> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        callbacks = urc_callbacks_;
+    }
+    for (auto& callback : callbacks) {
         callback(command, arguments);
     }
 }

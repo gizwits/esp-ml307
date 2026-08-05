@@ -150,6 +150,14 @@ int Ml307Tcp::Send(const std::string& data) {
     const size_t MAX_PACKET_SIZE = 1460 / 2;
     size_t total_sent = 0;
 
+    if (at_uart_->IsInUartTask()) {
+        ESP_LOGE(TAG, "Refusing synchronous send from UART receive/event task");
+        return -1;
+    }
+
+    // Keep all chunks and their +MIPSEND confirmations paired across callers.
+    std::lock_guard<std::mutex> send_lock(send_mutex_);
+
     if (!connected_) {
         ESP_LOGE(TAG, "Not connected");
         return -1;
@@ -173,16 +181,31 @@ int Ml307Tcp::Send(const std::string& data) {
         // 直接在command字符串上进行十六进制编码
         at_uart_->EncodeHexAppend(command, data.data() + total_sent, chunk_size);
         command += "\r\n";
-        
+
+        // Do not let a late confirmation from a previous timed-out send satisfy
+        // this transaction.
+        xEventGroupClearBits(event_group_handle_, ML307_TCP_SEND_COMPLETE);
         if (!at_uart_->SendCommand(command, 100, false)) {
             ESP_LOGE(TAG, "Failed to send data chunk");
-            Disconnect();
+            connected_ = false;
+            if (disconnect_callback_) {
+                disconnect_callback_();
+            }
             return -1;
         }
 
-        auto bits = xEventGroupWaitBits(event_group_handle_, ML307_TCP_SEND_COMPLETE, pdTRUE, pdFALSE, pdMS_TO_TICKS(TCP_CONNECT_TIMEOUT_MS));
+        auto bits = xEventGroupWaitBits(event_group_handle_, ML307_TCP_SEND_COMPLETE,
+                                        pdTRUE, pdFALSE,
+                                        pdMS_TO_TICKS(ML307_TCP_SEND_TIMEOUT_MS));
         if (!(bits & ML307_TCP_SEND_COMPLETE)) {
-            ESP_LOGE(TAG, "No send confirmation received");
+            ESP_LOGE(TAG, "No send confirmation received within %d ms",
+                     ML307_TCP_SEND_TIMEOUT_MS);
+            // Fail fast: otherwise every queued audio frame would wait for another
+            // timeout and starve the main task until its watchdog fires.
+            connected_ = false;
+            if (disconnect_callback_) {
+                disconnect_callback_();
+            }
             return -1;
         }
 

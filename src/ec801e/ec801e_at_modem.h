@@ -5,7 +5,7 @@
 
 class Ec801EAtModem : public AtModem {
 public:
-    Ec801EAtModem(std::shared_ptr<AtUart> at_uart);
+    Ec801EAtModem(std::shared_ptr<AtUart> at_uart, TcpAccessMode tcp_access_mode);
     ~Ec801EAtModem() override = default;
 
     bool SetSleepMode(bool enable, int delay_seconds=0) override;
@@ -23,6 +23,9 @@ public:
 
 protected:
     void HandleUrc(const std::string& command, const std::vector<AtArgumentValue>& arguments) override;
+
+private:
+    TcpAccessMode tcp_access_mode_;
 };
 
 

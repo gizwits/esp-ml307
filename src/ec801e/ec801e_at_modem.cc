@@ -17,7 +17,9 @@
 #define TAG "Ec801EAtModem"
 
 
-Ec801EAtModem::Ec801EAtModem(std::shared_ptr<AtUart> at_uart) : AtModem(at_uart) {
+Ec801EAtModem::Ec801EAtModem(std::shared_ptr<AtUart> at_uart,
+                             TcpAccessMode tcp_access_mode)
+    : AtModem(at_uart), tcp_access_mode_(tcp_access_mode) {
     // 子类特定的初始化在这里
     // ATE0 关闭 echo
     at_uart_->SendCommand("ATE0");
@@ -47,7 +49,7 @@ std::unique_ptr<Http> Ec801EAtModem::CreateHttp(int connect_id) {
 
 std::unique_ptr<Tcp> Ec801EAtModem::CreateTcp(int connect_id) {
     assert(connect_id >= 0);
-    return std::make_unique<Ec801ETcp>(at_uart_, connect_id);
+    return std::make_unique<Ec801ETcp>(at_uart_, connect_id, tcp_access_mode_);
 }
 
 std::unique_ptr<Tcp> Ec801EAtModem::CreateSsl(int connect_id) {

@@ -50,7 +50,8 @@ void AtUart::Initialize(size_t rx_buf_size, size_t task_stack) {
     uart_config.stop_bits = UART_STOP_BITS_1;
     uart_config.source_clk = UART_SCLK_DEFAULT;
 
-    ESP_LOGI(TAG, "init uart %d, rx_buf=%zu, task_stack=%zu", uart_num_, rx_buf_size, task_stack);
+    ESP_LOGI(TAG, "init uart %d, rx_buf=%u, task_stack=%u", uart_num_,
+             static_cast<unsigned>(rx_buf_size), static_cast<unsigned>(task_stack));
 
     ESP_ERROR_CHECK(uart_driver_install(uart_num_, rx_buf_size, 0, 20, &event_queue_handle_, ESP_INTR_FLAG_IRAM));
     ESP_ERROR_CHECK(uart_param_config(uart_num_, &uart_config));
@@ -89,14 +90,29 @@ void AtUart::EventTaskWrapper(void* arg) {
 
 void AtUart::EventTask() {
     uart_event_t event;
-    static uint32_t total_read_bytes = 0;
-    static uint32_t read_count = 0;
-    static uint32_t last_log_time = 0;
+    uint32_t interval_read_bytes = 0;
+    uint32_t interval_read_count = 0;
+    uint32_t interval_data_events = 0;
+    uint32_t interval_overflows = 0;
+    size_t interval_max_read = 0;
+    size_t interval_max_hw_buffered = 0;
+    size_t interval_max_sw_buffered = 0;
+    UBaseType_t interval_max_event_queue_depth = 0;
+    int64_t interval_max_data_event_gap_us = 0;
+    int64_t last_data_event_us = 0;
+    int64_t last_log_us = esp_timer_get_time();
     while (true) {
         if (xQueueReceive(event_queue_handle_, &event, portMAX_DELAY) == pdTRUE) {
             switch (event.type)
             {
             case UART_DATA: {
+                int64_t data_event_us = esp_timer_get_time();
+                if (last_data_event_us != 0) {
+                    interval_max_data_event_gap_us = std::max(
+                        interval_max_data_event_gap_us, data_event_us - last_data_event_us);
+                }
+                last_data_event_us = data_event_us;
+                ++interval_data_events;
                 // 立即读取数据，避免FIFO溢出
                 // 循环读取直到没有数据，确保快速清空硬件FIFO
                 bool has_data = false;
@@ -107,6 +123,7 @@ void AtUart::EventTask() {
                     if (available == 0) {
                         break;
                     }
+                    interval_max_hw_buffered = std::max(interval_max_hw_buffered, available);
                     
                     // 限制单次读取大小，避免阻塞
                     size_t read_size = std::min(available, size_t(2048));
@@ -117,7 +134,11 @@ void AtUart::EventTask() {
                         size_t old_size = rx_buffer_.size();
                         rx_buffer_.resize(old_size + read_size);
                         uart_read_bytes(uart_num_, &rx_buffer_[old_size], read_size, 0);
+                        interval_max_sw_buffered = std::max(interval_max_sw_buffered, rx_buffer_.size());
                     }
+                    interval_read_bytes += read_size;
+                    ++interval_read_count;
+                    interval_max_read = std::max(interval_max_read, read_size);
                     has_data = true;
                 }
                 
@@ -131,6 +152,7 @@ void AtUart::EventTask() {
                 ESP_LOGI(TAG, "break");
                 break;
             case UART_BUFFER_FULL: {
+                ++interval_overflows;
                 size_t available;
                 uart_get_buffered_data_len(uart_num_, &available);
                 ESP_LOGE(TAG, "[溢出] UART buffer full! rx_buffer: %zu bytes, UART剩余: %zu bytes", 
@@ -138,6 +160,7 @@ void AtUart::EventTask() {
                 break;
             }
             case UART_FIFO_OVF: {
+                ++interval_overflows;
                 // FIFO溢出是瞬时事件，可能发生在数据到达的瞬间
                 // 即使循环读取，如果数据到达太快，在两次UART_DATA事件之间也可能溢出
                 // 在溢出事件中也尝试读取剩余数据，减少数据丢失
@@ -168,32 +191,125 @@ void AtUart::EventTask() {
                 ESP_LOGE(TAG, "unknown event type: %d", event.type);
                 break;
             }
+            interval_max_event_queue_depth = std::max(
+                interval_max_event_queue_depth, uxQueueMessagesWaiting(event_queue_handle_));
+
+            int64_t now_us = esp_timer_get_time();
+            int64_t elapsed_us = now_us - last_log_us;
+            if (elapsed_us >= 1000000) {
+                size_t hw_buffered = 0;
+                size_t sw_buffered = 0;
+                uint32_t actual_baud = 0;
+                uart_get_baudrate(uart_num_, &actual_baud);
+                uart_get_buffered_data_len(uart_num_, &hw_buffered);
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    sw_buffered = rx_buffer_.size();
+                }
+                double bytes_per_second = interval_read_bytes * 1000000.0 / elapsed_us;
+                ESP_LOGD(TAG,
+                         "[RX] uart=%d baud=%u %.0f B/s (%u B/%u ms), events=%u reads=%u, "
+                         "event_gap_max=%u ms queue_max=%u max_read=%u "
+                         "hw_now/max=%u/%u sw_now/max=%u/%u overflow=%u",
+                         uart_num_, static_cast<unsigned>(actual_baud), bytes_per_second,
+                         interval_read_bytes,
+                         static_cast<unsigned>(elapsed_us / 1000), interval_data_events,
+                         interval_read_count,
+                         static_cast<unsigned>(interval_max_data_event_gap_us / 1000),
+                         static_cast<unsigned>(interval_max_event_queue_depth),
+                         static_cast<unsigned>(interval_max_read),
+                         static_cast<unsigned>(hw_buffered),
+                         static_cast<unsigned>(interval_max_hw_buffered),
+                         static_cast<unsigned>(sw_buffered),
+                         static_cast<unsigned>(interval_max_sw_buffered),
+                         interval_overflows);
+                interval_read_bytes = 0;
+                interval_read_count = 0;
+                interval_data_events = 0;
+                interval_overflows = 0;
+                interval_max_read = 0;
+                interval_max_hw_buffered = 0;
+                interval_max_sw_buffered = sw_buffered;
+                interval_max_event_queue_depth = 0;
+                interval_max_data_event_gap_us = 0;
+                last_log_us = now_us;
+            }
         }
     }
 }
 
 void AtUart::ReceiveTask() {
-    static uint32_t total_parse_count = 0;
-    static uint32_t process_count = 0;
-    static uint32_t last_log_time = 0;
+    uint32_t interval_parse_count = 0;
+    uint32_t interval_process_count = 0;
+    uint32_t interval_parse_limit_hits = 0;
+    size_t interval_max_sw_before = 0;
+    size_t interval_max_sw_after = 0;
+    size_t interval_max_hw_after = 0;
+    int64_t interval_max_process_us = 0;
+    int64_t last_log_us = esp_timer_get_time();
     
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_handle_, AT_EVENT_DATA_AVAILABLE, pdTRUE, pdFALSE, portMAX_DELAY);
         if (bits & AT_EVENT_DATA_AVAILABLE) {
-            TickType_t process_start = xTaskGetTickCount();
-            size_t rx_buffer_before = rx_buffer_.size();
+            int64_t process_start_us = esp_timer_get_time();
+            size_t rx_buffer_before = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                rx_buffer_before = rx_buffer_.size();
+            }
             
             // 限制解析次数，避免长时间阻塞
             int parse_count = 0;
             const int MAX_PARSE_PER_LOOP = 50;  // 每次最多解析50条响应
             while (ParseResponse() && ++parse_count < MAX_PARSE_PER_LOOP) {}
             
-            // 如果还有数据未处理，继续设置事件位
-            size_t available;
-            uart_get_buffered_data_len(uart_num_, &available);
-            if (available > 0) {
-                ESP_LOGD(TAG, "[消费] UART还有 %zu bytes 未读，继续处理", available);
+            size_t sw_buffer_after = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                sw_buffer_after = rx_buffer_.size();
+            }
+            size_t hw_buffer_after = 0;
+            uart_get_buffered_data_len(uart_num_, &hw_buffer_after);
+
+            ++interval_process_count;
+            interval_parse_count += parse_count;
+            interval_max_sw_before = std::max(interval_max_sw_before, rx_buffer_before);
+            interval_max_sw_after = std::max(interval_max_sw_after, sw_buffer_after);
+            interval_max_hw_after = std::max(interval_max_hw_after, hw_buffer_after);
+            interval_max_process_us = std::max(interval_max_process_us,
+                                                esp_timer_get_time() - process_start_us);
+            if (parse_count >= MAX_PARSE_PER_LOOP) {
+                ++interval_parse_limit_hits;
+            }
+
+            // 保持原有调度策略：仅在硬件 UART 仍有数据时再次唤醒。
+            if (hw_buffer_after > 0) {
+                ESP_LOGD(TAG, "[消费] UART还有 %zu bytes 未读，继续处理", hw_buffer_after);
                 xEventGroupSetBits(event_group_handle_, AT_EVENT_DATA_AVAILABLE);
+            }
+
+            int64_t now_us = esp_timer_get_time();
+            int64_t elapsed_us = now_us - last_log_us;
+            if (elapsed_us >= 1000000) {
+                ESP_LOGD(TAG,
+                         "[Parse] uart=%d parsed=%u wakes=%u limit_hits=%u, "
+                         "sw_before_max=%u sw_after_now/max=%u/%u hw_after_max=%u "
+                         "loop_max=%u us",
+                         uart_num_, interval_parse_count, interval_process_count,
+                         interval_parse_limit_hits,
+                         static_cast<unsigned>(interval_max_sw_before),
+                         static_cast<unsigned>(sw_buffer_after),
+                         static_cast<unsigned>(interval_max_sw_after),
+                         static_cast<unsigned>(interval_max_hw_after),
+                         static_cast<unsigned>(interval_max_process_us));
+                interval_parse_count = 0;
+                interval_process_count = 0;
+                interval_parse_limit_hits = 0;
+                interval_max_sw_before = sw_buffer_after;
+                interval_max_sw_after = sw_buffer_after;
+                interval_max_hw_after = 0;
+                interval_max_process_us = 0;
+                last_log_us = now_us;
             }
         }
     }
@@ -285,12 +401,117 @@ bool AtUart::ParseResponse() {
         // 没有引号或没有 payload_length → 走通用解析
     }
 
+    // ========== 特殊处理：缓存模式 AT+QIRD 返回的原始数据 ==========
+    // viewmode=0 格式：+QIRD: <read_actual_length>\r\n<raw_data>\r\n
+    // raw_data 可能包含 \r\n，必须按 read_actual_length 精确定位。
+    if (rx_buffer_.size() >= 7 && rx_buffer_.compare(0, 7, "+QIRD: ") == 0) {
+        auto header_end = rx_buffer_.find("\r\n", 7);
+        if (header_end == std::string::npos) return false;
+
+        std::string len_str = rx_buffer_.substr(7, header_end - 7);
+        if (is_number(len_str)) {
+            int data_length = std::stoi(len_str);
+            size_t data_start = header_end + 2;
+            size_t response_end = data_start;
+            if (data_length > 0) {
+                response_end = data_start + static_cast<size_t>(data_length) + 2;
+                if (rx_buffer_.size() < response_end) return false;
+            }
+
+            std::string raw_data;
+            if (data_length > 0) {
+                raw_data = rx_buffer_.substr(data_start, data_length);
+            }
+            rx_buffer_.erase(0, response_end);
+
+            AtArgumentValue arg_len;
+            arg_len.type = AtArgumentValue::Type::Int;
+            arg_len.int_value = data_length;
+            parsed_arguments.push_back(arg_len);
+            if (data_length > 0) {
+                AtArgumentValue arg_data;
+                arg_data.type = AtArgumentValue::Type::String;
+                arg_data.string_value = std::move(raw_data);
+                parsed_arguments.push_back(std::move(arg_data));
+            }
+
+            static uint32_t qird_count = 0;
+            static uint32_t qird_bytes = 0;
+            static uint32_t qird_zero_count = 0;
+            static size_t qird_max_chunk = 0;
+            static int64_t qird_max_gap_us = 0;
+            static int64_t qird_max_callback_us = 0;
+            static int64_t qird_last_data_us = 0;
+            static int64_t qird_last_log_us = esp_timer_get_time();
+
+            int64_t data_now_us = esp_timer_get_time();
+            ++qird_count;
+            if (data_length > 0) {
+                qird_bytes += static_cast<uint32_t>(data_length);
+                qird_max_chunk = std::max(qird_max_chunk, static_cast<size_t>(data_length));
+                if (qird_last_data_us != 0) {
+                    qird_max_gap_us = std::max(qird_max_gap_us,
+                                               data_now_us - qird_last_data_us);
+                }
+                qird_last_data_us = data_now_us;
+            } else {
+                ++qird_zero_count;
+            }
+
+            lock.unlock();
+            int64_t callback_start_us = esp_timer_get_time();
+            HandleUrc("QIRD", parsed_arguments);
+            qird_max_callback_us = std::max(qird_max_callback_us,
+                                             esp_timer_get_time() - callback_start_us);
+
+            int64_t log_now_us = esp_timer_get_time();
+            int64_t log_elapsed_us = log_now_us - qird_last_log_us;
+            if (log_elapsed_us >= 1000000) {
+                double bytes_per_second = qird_bytes * 1000000.0 / log_elapsed_us;
+                ESP_LOGD(TAG,
+                         "[QIRD RX] uart=%d %.0f B/s (%u B/%u ms), reads=%u empty=%u "
+                         "chunk_max=%u gap_max=%u ms callback_max=%u us",
+                         uart_num_, bytes_per_second, qird_bytes,
+                         static_cast<unsigned>(log_elapsed_us / 1000), qird_count,
+                         qird_zero_count, static_cast<unsigned>(qird_max_chunk),
+                         static_cast<unsigned>(qird_max_gap_us / 1000),
+                         static_cast<unsigned>(qird_max_callback_us));
+                qird_count = 0;
+                qird_bytes = 0;
+                qird_zero_count = 0;
+                qird_max_chunk = 0;
+                qird_max_gap_us = 0;
+                qird_max_callback_us = 0;
+                qird_last_log_us = log_now_us;
+            }
+            return true;
+        }
+        // AT+QIRD=<id>,0 的长度查询会返回多个数字，交给通用解析。
+    }
+
     // ========== 特殊处理：+QIURC: "recv" 基于 data_length 精确解析（文本模式）==========
     // 格式：+QIURC: "recv",<connect_id>,<data_length>,<raw_data>\r\n
     // raw_data 可能包含 \r\n、逗号、引号等任意字符，必须用 data_length 定位结尾
-    if (rx_buffer_.size() >= 15 && rx_buffer_.compare(0, 15, "+QIURC: \"recv\",") == 0) {
-        auto comma1 = rx_buffer_.find(',', 15);
-        if (comma1 == std::string::npos) return false;
+    bool is_qiurc_recv = rx_buffer_.size() >= 15 &&
+                         rx_buffer_.compare(0, 15, "+QIURC: \"recv\",") == 0;
+    auto qiurc_id_comma = is_qiurc_recv ? rx_buffer_.find(',', 15) : std::string::npos;
+    auto qiurc_header_end = is_qiurc_recv ? rx_buffer_.find("\r\n", 15) : std::string::npos;
+    // 缓存模式只有 +QIURC: "recv",<id>\r\n，应交给下方通用行解析。
+    // 只有 id 后面在本行内确实还有逗号时，才是带 length/data 的直吐模式。
+    bool is_qiurc_direct_push = is_qiurc_recv && qiurc_id_comma != std::string::npos &&
+                                (qiurc_header_end == std::string::npos ||
+                                 qiurc_id_comma < qiurc_header_end);
+    if (is_qiurc_direct_push) {
+        static uint32_t qiurc_count = 0;
+        static uint32_t qiurc_bytes = 0;
+        static size_t qiurc_min_chunk = SIZE_MAX;
+        static size_t qiurc_max_chunk = 0;
+        static int64_t qiurc_max_gap_us = 0;
+        static int64_t qiurc_max_callback_us = 0;
+        static int64_t qiurc_last_rx_us = 0;
+        static int64_t qiurc_last_log_us = esp_timer_get_time();
+
+        auto comma1 = qiurc_id_comma;
         std::string id_str = rx_buffer_.substr(15, comma1 - 15);
         if (!is_number(id_str)) return false;
 
@@ -329,7 +550,42 @@ bool AtUart::ParseResponse() {
 
         command = "QIURC";
         lock.unlock();
+        int64_t rx_now_us = esp_timer_get_time();
+        if (qiurc_last_rx_us != 0) {
+            qiurc_max_gap_us = std::max(qiurc_max_gap_us, rx_now_us - qiurc_last_rx_us);
+        }
+        qiurc_last_rx_us = rx_now_us;
+        ++qiurc_count;
+        qiurc_bytes += data_length;
+        qiurc_min_chunk = std::min(qiurc_min_chunk, static_cast<size_t>(data_length));
+        qiurc_max_chunk = std::max(qiurc_max_chunk, static_cast<size_t>(data_length));
+
+        int64_t callback_start_us = esp_timer_get_time();
         HandleUrc(command, parsed_arguments);
+        qiurc_max_callback_us = std::max(qiurc_max_callback_us,
+                                         esp_timer_get_time() - callback_start_us);
+
+        int64_t log_now_us = esp_timer_get_time();
+        int64_t log_elapsed_us = log_now_us - qiurc_last_log_us;
+        if (log_elapsed_us >= 1000000) {
+            double bytes_per_second = qiurc_bytes * 1000000.0 / log_elapsed_us;
+            ESP_LOGD(TAG,
+                     "[QIURC RX] uart=%d %.0f B/s (%u B/%u ms), urc=%u "
+                     "chunk_min/max=%u/%u gap_max=%u ms callback_max=%u us",
+                     uart_num_, bytes_per_second, qiurc_bytes,
+                     static_cast<unsigned>(log_elapsed_us / 1000), qiurc_count,
+                     static_cast<unsigned>(qiurc_min_chunk == SIZE_MAX ? 0 : qiurc_min_chunk),
+                     static_cast<unsigned>(qiurc_max_chunk),
+                     static_cast<unsigned>(qiurc_max_gap_us / 1000),
+                     static_cast<unsigned>(qiurc_max_callback_us));
+            qiurc_count = 0;
+            qiurc_bytes = 0;
+            qiurc_min_chunk = SIZE_MAX;
+            qiurc_max_chunk = 0;
+            qiurc_max_gap_us = 0;
+            qiurc_max_callback_us = 0;
+            qiurc_last_log_us = log_now_us;
+        }
         return true;
     }
 

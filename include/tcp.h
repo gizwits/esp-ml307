@@ -5,6 +5,11 @@
 #include <string>
 #include <functional>
 
+enum class TcpAccessMode {
+    Buffer = 0,
+    DirectPush = 1,
+};
+
 class Tcp {
 public:
     virtual ~Tcp() = default;

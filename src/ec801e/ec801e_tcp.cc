@@ -5,7 +5,9 @@
 #define TAG "Ec801ETcp"
 
 
-Ec801ETcp::Ec801ETcp(std::shared_ptr<AtUart> at_uart, int tcp_id) : at_uart_(at_uart), tcp_id_(tcp_id) {
+Ec801ETcp::Ec801ETcp(std::shared_ptr<AtUart> at_uart, int tcp_id,
+                     TcpAccessMode access_mode)
+    : at_uart_(at_uart), tcp_id_(tcp_id), access_mode_(access_mode) {
     event_group_handle_ = xEventGroupCreate();
 
     urc_callback_it_ = at_uart_->RegisterUrcCallback([this](const std::string& command, const std::vector<AtArgumentValue>& arguments) {
@@ -35,9 +37,15 @@ Ec801ETcp::Ec801ETcp(std::shared_ptr<AtUart> at_uart, int tcp_id) : at_uart_(at_
             }
         } else if (command == "QIURC" && arguments.size() >= 2) {
             if (arguments[1].int_value == tcp_id_) {
-                if (arguments[0].string_value == "recv" && arguments.size() >= 4) {
-                    if (connected_ && stream_callback_) {
-                        stream_callback_(arguments[3].string_value);
+                if (arguments[0].string_value == "recv") {
+                    if (arguments.size() >= 4) {
+                        // 兼容直吐模式的原始数据 URC。
+                        if (connected_ && stream_callback_) {
+                            stream_callback_(arguments[3].string_value);
+                        }
+                    } else if (connected_ && access_mode_ == TcpAccessMode::Buffer) {
+                        // 缓存模式只上报数据可读通知，由独立任务执行 QIRD。
+                        xEventGroupSetBits(event_group_handle_, EC801E_TCP_DATA_AVAILABLE);
                     }
                 } else if (arguments[0].string_value == "closed") {
                     if (connected_) {
@@ -51,6 +59,14 @@ Ec801ETcp::Ec801ETcp(std::shared_ptr<AtUart> at_uart, int tcp_id) : at_uart_(at_
                     ESP_LOGE(TAG, "Unknown QIURC command: %s", arguments[0].string_value.c_str());
                 }
             }
+        } else if (command == "QIRD" && qird_in_progress_.load()) {
+            if (!arguments.empty()) {
+                int data_length = arguments[0].int_value;
+                last_qird_length_.store(data_length);
+                if (data_length > 0 && arguments.size() >= 2 && connected_ && stream_callback_) {
+                    stream_callback_(arguments[1].string_value);
+                }
+            }
         } else if (command == "QISTATE" && arguments.size() > 5) {
             if (arguments[0].int_value == tcp_id_) {
                 connected_ = arguments[5].int_value == 2;
@@ -62,10 +78,22 @@ Ec801ETcp::Ec801ETcp(std::shared_ptr<AtUart> at_uart, int tcp_id) : at_uart_(at_
             Disconnect();
         }
     });
+
+    if (access_mode_ == TcpAccessMode::Buffer) {
+        if (xTaskCreate([](void* arg) {
+                auto tcp = static_cast<Ec801ETcp*>(arg);
+                tcp->ReceiveTask();
+                vTaskDelete(nullptr);
+            }, "ec801e_qird", 6144, this, 5, &receive_task_handle_) != pdPASS) {
+            receive_task_handle_ = nullptr;
+            ESP_LOGE(TAG, "Failed to create QIRD receive task");
+        }
+    }
 }
 
 Ec801ETcp::~Ec801ETcp() {
     Disconnect();
+    StopReceiveTask();
     at_uart_->UnregisterUrcCallback(urc_callback_it_);
     if (event_group_handle_) {
         vEventGroupDelete(event_group_handle_);
@@ -76,16 +104,25 @@ bool Ec801ETcp::Connect(const std::string& host, int port) {
     // Clear bits
     xEventGroupClearBits(event_group_handle_, EC801E_TCP_CONNECTED | EC801E_TCP_DISCONNECTED | EC801E_TCP_ERROR);
 
-    // Keep data in one line; Use text mode for both send and receive
-    at_uart_->SendCommand("AT+QICFG=\"close/mode\",1;+QICFG=\"viewmode\",1;+QICFG=\"sendinfo\",1;+QICFG=\"dataformat\",0,0");
+    bool use_buffer_mode = access_mode_ == TcpAccessMode::Buffer;
+    int view_mode = use_buffer_mode ? 0 : 1;
+    int access_mode = static_cast<int>(access_mode_);
+    ESP_LOGI(TAG, "TCP id=%d access mode: %s", tcp_id_,
+             use_buffer_mode ? "buffer/QIRD" : "direct push/QIURC");
+
+    // 缓存模式使用文档的分行 QIRD 格式，直吐模式使用单行 QIURC 格式。
+    at_uart_->SendCommand("AT+QICFG=\"close/mode\",1;+QICFG=\"viewmode\"," +
+                          std::to_string(view_mode) +
+                          ";+QICFG=\"sendinfo\",1;+QICFG=\"dataformat\",0,0");
 
     // 无条件关闭，确保模块侧 ID 空闲（忽略返回值）
     at_uart_->SendCommand("AT+QICLOSE=" + std::to_string(tcp_id_));
     xEventGroupWaitBits(event_group_handle_, EC801E_TCP_DISCONNECTED, pdTRUE, pdFALSE, pdMS_TO_TICKS(2000));
     instance_active_ = false;
 
-    // 打开 TCP 连接（access_mode=1 直接推送模式）
-    std::string command = "AT+QIOPEN=1," + std::to_string(tcp_id_) + ",\"TCP\",\"" + host + "\"," + std::to_string(port) + ",0,1";
+    std::string command = "AT+QIOPEN=1," + std::to_string(tcp_id_) +
+                          ",\"TCP\",\"" + host + "\"," + std::to_string(port) +
+                          ",0," + std::to_string(access_mode);
     ESP_LOGI(TAG, "Sending: %s", command.c_str());
     if (!at_uart_->SendCommand(command)) {
         ESP_LOGE(TAG, "Failed to open TCP connection");
@@ -103,6 +140,90 @@ bool Ec801ETcp::Connect(const std::string& host, int port) {
         return false;
     }
     return true;
+}
+
+void Ec801ETcp::ReceiveTask() {
+    constexpr int kReadLength = 1500;
+    constexpr int kMaxReadsPerBatch = 16;
+
+    while (true) {
+        auto bits = xEventGroupWaitBits(
+            event_group_handle_,
+            EC801E_TCP_DATA_AVAILABLE | EC801E_TCP_RECEIVE_TASK_STOP,
+            pdTRUE, pdFALSE, portMAX_DELAY);
+
+        if (bits & EC801E_TCP_RECEIVE_TASK_STOP) {
+            break;
+        }
+        if (!(bits & EC801E_TCP_DATA_AVAILABLE) || !connected_) {
+            continue;
+        }
+
+        bool needs_more_reads = false;
+        int reads = 0;
+        for (; reads < kMaxReadsPerBatch && connected_; ++reads) {
+            // 先拿到 AT 命令通道，确保只有当前 Tcp 实例处理没有 connectID
+            // 字段的 +QIRD 返回。SendCommand 内部使用可递归锁，可安全重入。
+            if (!at_uart_->TryLockChannel(200)) {
+                needs_more_reads = true;
+                break;
+            }
+
+            last_qird_length_.store(-1);
+            qird_in_progress_.store(true);
+            bool ok = at_uart_->SendCommand(
+                "AT+QIRD=" + std::to_string(tcp_id_) + "," + std::to_string(kReadLength),
+                2000);
+            qird_in_progress_.store(false);
+            at_uart_->UnlockChannel();
+
+            if (!ok) {
+                ESP_LOGW(TAG, "QIRD failed for id=%d", tcp_id_);
+                needs_more_reads = connected_;
+                break;
+            }
+
+            int actual_length = last_qird_length_.load();
+            if (actual_length < 0) {
+                ESP_LOGW(TAG, "QIRD returned OK without a parsed length (id=%d)", tcp_id_);
+                needs_more_reads = connected_;
+                break;
+            }
+            if (actual_length == 0) {
+                // 文档 3.2.3：QIRD: 0 表示模块接收缓存已读空。
+                break;
+            }
+        }
+
+        if (connected_ && (needs_more_reads || reads >= kMaxReadsPerBatch)) {
+            // 缓存未读空时模块不会再报新 URC，因此需要主动续读。
+            xEventGroupSetBits(event_group_handle_, EC801E_TCP_DATA_AVAILABLE);
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+
+    xEventGroupSetBits(event_group_handle_, EC801E_TCP_RECEIVE_TASK_STOPPED);
+}
+
+void Ec801ETcp::StopReceiveTask() {
+    if (!receive_task_handle_) {
+        return;
+    }
+
+    xEventGroupSetBits(event_group_handle_, EC801E_TCP_RECEIVE_TASK_STOP);
+    auto bits = xEventGroupWaitBits(event_group_handle_, EC801E_TCP_RECEIVE_TASK_STOPPED,
+                                    pdTRUE, pdFALSE, pdMS_TO_TICKS(3000));
+    if (!(bits & EC801E_TCP_RECEIVE_TASK_STOPPED)) {
+        ESP_LOGW(TAG, "QIRD receive task did not stop in time");
+        vTaskDelete(receive_task_handle_);
+    }
+    receive_task_handle_ = nullptr;
+}
+
+void Ec801ETcp::SetReceiveTaskPriority(unsigned int priority) {
+    if (receive_task_handle_) {
+        vTaskPrioritySet(receive_task_handle_, priority);
+    }
 }
 
 void Ec801ETcp::Disconnect() {

@@ -9,7 +9,10 @@
 
 static const char* TAG = "AtModem";
 
-std::unique_ptr<AtModem> AtModem::Detect(gpio_num_t tx_pin, gpio_num_t rx_pin, gpio_num_t dtr_pin, int baud_rate, uart_port_t uart_num) {
+std::unique_ptr<AtModem> AtModem::Detect(gpio_num_t tx_pin, gpio_num_t rx_pin,
+                                         gpio_num_t dtr_pin, int baud_rate,
+                                         uart_port_t uart_num,
+                                         TcpAccessMode tcp_access_mode) {
     // 创建AtUart进行检测
     auto uart = std::make_shared<AtUart>(tx_pin, rx_pin, dtr_pin, uart_num);
     uart->Initialize();
@@ -30,9 +33,9 @@ std::unique_ptr<AtModem> AtModem::Detect(gpio_num_t tx_pin, gpio_num_t rx_pin, g
     
     // 检查响应中的模组型号
     if (response.find("EC801E") == 0 || response.find("EG800AK") == 0) {
-        return std::make_unique<Ec801EAtModem>(uart);
+        return std::make_unique<Ec801EAtModem>(uart, tcp_access_mode);
     } else if (response.find("NT26K") == 0) {
-        return std::make_unique<Ec801EAtModem>(uart);
+        return std::make_unique<Ec801EAtModem>(uart, tcp_access_mode);
     } else if (response.find("ML307") == 0) {
         return std::make_unique<Ml307AtModem>(uart);
     } else {

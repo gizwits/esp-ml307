@@ -47,6 +47,10 @@ WebSocket::WebSocket(NetworkInterface* network, int connect_id) : network_(netwo
 }
 
 WebSocket::~WebSocket() {
+    // 先等所有数据帧/控制帧发送结束。否则 CloseAudioChannel
+    // 与 Ec801ETcp::Send 重试并发时，tcp_.reset() 会造成 use-after-free。
+    std::lock_guard<std::recursive_mutex> send_lock(send_mutex_);
+
     // 清理pong定时器
     if (pong_timer_ != nullptr) {
         esp_timer_stop(pong_timer_);
@@ -227,6 +231,11 @@ bool WebSocket::Send(const std::string& data) {
 }
 
 bool WebSocket::Send(const void* data, size_t len, bool binary, bool fin) {
+    std::lock_guard<std::recursive_mutex> send_lock(send_mutex_);
+    if (!tcp_ || !connected_.load(std::memory_order_acquire)) {
+        return false;
+    }
+
     if (len > 65535) {
         ESP_LOGE(TAG, "Data too large, maximum supported size is 65535 bytes");
         return false;
@@ -279,8 +288,8 @@ void WebSocket::Ping() {
 }
 
 void WebSocket::Close() {
-    if (connected_) {
-        is_closing_ = true;  // 标记为主动关闭
+    if (connected_.load(std::memory_order_acquire)) {
+        is_closing_.store(true, std::memory_order_release);  // 标记为主动关闭
         SendControlFrame(0x8, nullptr, 0);
     }
 }
@@ -418,9 +427,8 @@ void WebSocket::OnTcpData(const std::string& data) {
                 break;
             case 0x8: // 关闭帧
                 {
-                    connected_ = false;
-                    bool was_closing = is_closing_;
-                    is_closing_ = false;  // 重置标志
+                    connected_.store(false, std::memory_order_release);
+                    is_closing_.store(false, std::memory_order_release);
                     ResetFragmentState();  // 重置分片状态
                     if (on_disconnected_) {
                         on_disconnected_(true);  // true 表示正常关闭（收到关闭帧）
@@ -451,6 +459,7 @@ void WebSocket::OnTcpData(const std::string& data) {
                     esp_timer_create_args_t timer_args = {
                         .callback = [](void* arg) {
                             WebSocket* ws = static_cast<WebSocket*>(arg);
+                            std::lock_guard<std::recursive_mutex> send_lock(ws->send_mutex_);
                             ESP_LOGI(TAG, "Sending pong");
 #ifdef CONFIG_PROTOCOL_TYPE_COZE
 
@@ -505,6 +514,11 @@ void WebSocket::OnTcpData(const std::string& data) {
 
 
 bool WebSocket::SendControlFrame(uint8_t opcode, const void* data, size_t len) {
+    std::lock_guard<std::recursive_mutex> send_lock(send_mutex_);
+    if (!tcp_ || !connected_.load(std::memory_order_acquire)) {
+        return false;
+    }
+
     if (len > 125) {
         ESP_LOGE(TAG, "控制帧有效载荷过大");
         return false;

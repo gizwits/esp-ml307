@@ -5,6 +5,8 @@
 #include <string>
 #include <map>
 #include <thread>
+#include <atomic>
+#include <mutex>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <esp_timer.h>
@@ -35,12 +37,15 @@ public:
 private:
     NetworkInterface* network_;
     int connect_id_;
+    // 同一 TCP 连接的数据帧、pong 和 close 帧必须串行。
+    // 析构也使用这把锁，确保 Tcp::Send() 返回前不会释放 tcp_。
+    mutable std::recursive_mutex send_mutex_;
     std::unique_ptr<Tcp> tcp_;
     bool continuation_ = false;
     size_t receive_buffer_size_ = 2048;
     std::string receive_buffer_;
     bool handshake_completed_ = false;
-    bool connected_ = false;
+    std::atomic<bool> connected_{false};
     
     // FreeRTOS 事件组用于同步握手
     EventGroupHandle_t handshake_event_group_;
@@ -52,7 +57,7 @@ private:
     std::function<void(int)> on_error_;
     std::function<void()> on_connected_;
     std::function<void(bool is_clean)> on_disconnected_;
-    bool is_closing_ = false;  // 标记是否主动关闭
+    std::atomic<bool> is_closing_{false};  // 标记是否主动关闭
     size_t pong_payload_length_ = 0;
     uint8_t pong_payload_[125];
     esp_timer_handle_t pong_timer_ = nullptr;  // 用于管理pong响应的定时器

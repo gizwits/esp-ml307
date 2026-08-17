@@ -144,7 +144,7 @@ bool Ec801ETcp::Connect(const std::string& host, int port) {
 
 void Ec801ETcp::ReceiveTask() {
     constexpr int kReadLength = 1500;
-    constexpr int kMaxReadsPerBatch = 16;
+    constexpr int kDefaultMaxReadsPerBatch = 16;
 
     while (true) {
         auto bits = xEventGroupWaitBits(
@@ -160,8 +160,23 @@ void Ec801ETcp::ReceiveTask() {
         }
 
         bool needs_more_reads = false;
+        bool receive_throttled = false;
+        // 只有设置了上层背压回调的连接（如音乐 HTTP）才每轮
+        // 读一块，使队列水位及时更新。普通 WebSocket 没有该回调，
+        // 保持原有批量读取吞吐。
+        const int max_reads_per_batch = can_receive_callback_ ? 1 : kDefaultMaxReadsPerBatch;
         int reads = 0;
-        for (; reads < kMaxReadsPerBatch && connected_; ++reads) {
+        for (; reads < max_reads_per_batch && connected_; ++reads) {
+            // 缓存模式由 QIRD 主动从模组取数据。上层队列达到高水位时暂停
+            // QIRD，让尚未消费的数据留在模组缓存，避免继续灌入本地 HTTP/
+            // 音频队列。恢复后必须重新触发 DATA_AVAILABLE，因为模组不会为
+            // 同一批未读缓存重复发送 URC。
+            if (can_receive_callback_ && !can_receive_callback_()) {
+                needs_more_reads = true;
+                receive_throttled = true;
+                break;
+            }
+
             // 先拿到 AT 命令通道，确保只有当前 Tcp 实例处理没有 connectID
             // 字段的 +QIRD 返回。SendCommand 内部使用可递归锁，可安全重入。
             if (!at_uart_->TryLockChannel(200)) {
@@ -195,10 +210,10 @@ void Ec801ETcp::ReceiveTask() {
             }
         }
 
-        if (connected_ && (needs_more_reads || reads >= kMaxReadsPerBatch)) {
+        if (connected_ && (needs_more_reads || reads >= max_reads_per_batch)) {
             // 缓存未读空时模块不会再报新 URC，因此需要主动续读。
             xEventGroupSetBits(event_group_handle_, EC801E_TCP_DATA_AVAILABLE);
-            vTaskDelay(pdMS_TO_TICKS(1));
+            vTaskDelay(pdMS_TO_TICKS(receive_throttled ? 10 : 1));
         }
     }
 

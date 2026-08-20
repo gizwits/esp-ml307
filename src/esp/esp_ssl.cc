@@ -1,6 +1,9 @@
 #include "esp_ssl.h"
 #include <esp_log.h>
+#include <sdkconfig.h>
+#if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE) && CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #include <esp_crt_bundle.h>
+#endif
 #include <cstring>
 #include <unistd.h>
 
@@ -32,7 +35,9 @@ bool EspSsl::Connect(const std::string& host, int port) {
     }
 
     esp_tls_cfg_t cfg = {};
+#if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE) && CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
 
     int ret = esp_tls_conn_new_sync(host.c_str(), host.length(), port, &cfg, tls_client_);
     if (ret != 1) {

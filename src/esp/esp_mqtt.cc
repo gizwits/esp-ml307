@@ -1,5 +1,8 @@
 #include "esp_mqtt.h"
+#include <sdkconfig.h>
+#if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE) && CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #include <esp_crt_bundle.h>
+#endif
 #include <esp_log.h>
 
 static const char *TAG = "esp_mqtt";
@@ -26,7 +29,9 @@ bool EspMqtt::Connect(const std::string broker_address, int broker_port, const s
     mqtt_config.broker.address.port = broker_port;
     if (broker_port == 8883) {
         mqtt_config.broker.address.transport = MQTT_TRANSPORT_OVER_SSL;
+#if defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE) && CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
         mqtt_config.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+#endif
     } else {
         mqtt_config.broker.address.transport = MQTT_TRANSPORT_OVER_TCP;
     }

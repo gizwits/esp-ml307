@@ -632,15 +632,42 @@ int HttpClient::Read(char* buffer, size_t buffer_size) {
         return 0;  // 正常结束
     }
 
-    // 等待数据或连接关闭
-    auto timeout = std::chrono::milliseconds(timeout_ms_);
-    bool received = cv_.wait_for(read_lock, timeout, [this] {
+    // 等待数据或连接关闭。外部背压代表本机主动暂停 QIRD，
+    // 不能把这段时间算成网络无数据，否则长提示音会误关音乐连接。
+    const auto timeout = std::chrono::milliseconds(timeout_ms_);
+    const auto backpressure_poll_interval = std::chrono::milliseconds(100);
+    auto idle_deadline = std::chrono::steady_clock::now() + timeout;
+    auto read_finished = [this] {
         return !body_chunks_.empty() || eof_ || !connected_ || connection_error_;
-    });
+    };
 
-    if (!received) {
-        ESP_LOGE(TAG, "Wait for HTTP content receive timeout");
-        return -1;
+    while (!read_finished()) {
+        // can_receive_callback_ 会查询音频队列并获取它的锁，不应在
+        // 持有 read_mutex_ 时调用，避免与 TCP 接收回调形成锁顺序反转。
+        read_lock.unlock();
+        bool receive_throttled = can_receive_callback_ && !can_receive_callback_();
+        read_lock.lock();
+
+        if (read_finished()) {
+            break;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (receive_throttled) {
+            // 背压解除后应获得一个完整的网络等待周期。
+            idle_deadline = now + timeout;
+            cv_.wait_until(read_lock, now + backpressure_poll_interval, read_finished);
+            continue;
+        }
+
+        if (now >= idle_deadline) {
+            ESP_LOGE(TAG, "Wait for HTTP content receive timeout");
+            return -1;
+        }
+
+        cv_.wait_until(read_lock,
+                       std::min(idle_deadline, now + backpressure_poll_interval),
+                       read_finished);
     }
 
     // 再次检查连接错误状态

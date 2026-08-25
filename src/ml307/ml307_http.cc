@@ -6,6 +6,13 @@
 
 static const char *TAG = "Ml307Http";
 
+namespace {
+// The module allocates the HTTP ID asynchronously through MHTTPCREATE. Serialize
+// only that allocation window; requests can run concurrently after receiving
+// their own IDs.
+std::mutex http_create_mutex;
+}
+
 Ml307Http::Ml307Http(std::shared_ptr<AtUart> at_uart) : at_uart_(at_uart) {
     event_group_handle_ = xEventGroupCreate();
 
@@ -61,7 +68,8 @@ Ml307Http::Ml307Http(std::shared_ptr<AtUart> at_uart) : at_uart_(at_uart) {
                     ESP_LOGE(TAG, "Unknown HTTP event: %s", type.c_str());
                 }
             }
-        } else if (command == "MHTTPCREATE") {
+        } else if (command == "MHTTPCREATE" &&
+                   waiting_for_create_.load(std::memory_order_acquire)) {
             http_id_ = arguments[0].int_value;
             instance_active_ = true;
             xEventGroupSetBits(event_group_handle_, ML307_HTTP_EVENT_INITIALIZED);
@@ -104,9 +112,10 @@ int Ml307Http::Write(const char* buffer, size_t buffer_size) {
         return 0;
     }
     std::string command = "AT+MHTTPCONTENT=" + std::to_string(http_id_) + ",1," + std::to_string(buffer_size);
-    at_uart_->SendCommand(command);
-    at_uart_->SendCommand(std::string(buffer, buffer_size));
-    return buffer_size;
+    if (!at_uart_->SendCommandWithData(command, buffer, buffer_size)) {
+        return -1;
+    }
+    return static_cast<int>(buffer_size);
 }
 
 Ml307Http::~Ml307Http() {
@@ -181,17 +190,26 @@ bool Ml307Http::Open(const std::string& method, const std::string& url) {
         return false;
     }
 
-    // 创建HTTP连接
-    std::string command = "AT+MHTTPCREATE=\"" + protocol_ + "://" + host_ + "\"";
-    if (!at_uart_->SendCommand(command)) {
-        ESP_LOGE(TAG, "Failed to create HTTP connection");
-        return false;
-    }
+    std::string command;
+    {
+        std::lock_guard<std::mutex> create_lock(http_create_mutex);
+        // 创建HTTP连接。所有 Ml307Http 都能收到 MHTTPCREATE，因此必须先标记
+        // 当前实例，避免并发创建时互相覆盖 http_id_。
+        command = "AT+MHTTPCREATE=\"" + protocol_ + "://" + host_ + "\"";
+        waiting_for_create_.store(true, std::memory_order_release);
+        if (!at_uart_->SendCommand(command)) {
+            waiting_for_create_.store(false, std::memory_order_release);
+            ESP_LOGE(TAG, "Failed to create HTTP connection");
+            return false;
+        }
 
-    auto bits = xEventGroupWaitBits(event_group_handle_, ML307_HTTP_EVENT_INITIALIZED, pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms_));
-    if (!(bits & ML307_HTTP_EVENT_INITIALIZED)) {
-        ESP_LOGE(TAG, "Timeout waiting for HTTP connection to be created");
-        return false;
+        auto bits = xEventGroupWaitBits(event_group_handle_, ML307_HTTP_EVENT_INITIALIZED,
+                                        pdTRUE, pdFALSE, pdMS_TO_TICKS(timeout_ms_));
+        waiting_for_create_.store(false, std::memory_order_release);
+        if (!(bits & ML307_HTTP_EVENT_INITIALIZED)) {
+            ESP_LOGE(TAG, "Timeout waiting for HTTP connection to be created");
+            return false;
+        }
     }
     request_chunked_ = method_supports_content && !content_.has_value();
     ESP_LOGI(TAG, "HTTP connection created, ID: %d, protocol: %s, host: %s", http_id_, protocol_.c_str(), host_.c_str());
@@ -224,8 +242,11 @@ bool Ml307Http::Open(const std::string& method, const std::string& url) {
 
     if (method_supports_content && content_.has_value()) {
         command = "AT+MHTTPCONTENT=" + std::to_string(http_id_) + ",0," + std::to_string(content_.value().size());
-        at_uart_->SendCommand(command);
-        at_uart_->SendCommand(content_.value());
+        if (!at_uart_->SendCommandWithData(command, content_.value().data(),
+                                           content_.value().size())) {
+            ESP_LOGE(TAG, "Failed to send HTTP content");
+            return false;
+        }
         content_ = std::nullopt;
     }
 

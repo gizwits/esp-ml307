@@ -12,6 +12,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <optional>
+#include <atomic>
 
 #define ML307_HTTP_EVENT_INITIALIZED (1 << 0)
 #define ML307_HTTP_EVENT_ERROR (1 << 2)
@@ -63,6 +64,9 @@ private:
     bool instance_active_ = false;
     bool request_chunked_ = false;
     bool response_chunked_ = false;
+    // MHTTPCREATE is a broadcast URC. Only the instance currently issuing the
+    // create command may claim the returned http_id.
+    std::atomic<bool> waiting_for_create_{false};
 
     bool FetchHeaders();
     void ParseResponseHeaders(const std::string& headers);

@@ -2,6 +2,7 @@
 #define _AT_MODEM_H_
 
 #include <cstddef>
+#include <ctime>
 #include <string>
 #include <vector>
 #include <list>
@@ -88,6 +89,10 @@ public:
     CeregState GetRegistrationState();
     std::string GetCarrierName();
     int GetCsq();
+
+    // Current UTC from the cellular network, without opening a socket.
+    // False means unsupported, busy, unavailable, or malformed; output unchanged.
+    virtual bool GetNetworkTime(time_t& timestamp) { return false; }
 
     // APN 设置
     bool SetApn(const std::string& apn, int cid = 1, const std::string& pdp_type = "IP");

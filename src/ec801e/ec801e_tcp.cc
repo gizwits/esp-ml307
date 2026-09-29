@@ -1,6 +1,9 @@
 #include "ec801e_tcp.h"
 
 #include <esp_log.h>
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+#include <esp_timer.h>
+#endif
 
 #define TAG "Ec801ETcp"
 
@@ -145,18 +148,52 @@ bool Ec801ETcp::Connect(const std::string& host, int port) {
 void Ec801ETcp::ReceiveTask() {
     constexpr int kReadLength = 1500;
     constexpr int kDefaultMaxReadsPerBatch = 16;
+    constexpr int kBackpressureRecoveryPollMs = 250;
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+    unsigned diag_reads = 0, diag_bytes = 0, diag_empty = 0, diag_errors = 0;
+    unsigned diag_polls = 0, diag_wakes = 0, diag_busy = 0, diag_throttle = 0;
+    int64_t diag_last = 0;
+    auto log_receive = [&](bool final) {
+        const int64_t now = esp_timer_get_time();
+        if (tcp_id_ != 2 || (!final && now - diag_last < 1000000)) return;
+        diag_last = now;
+        ESP_LOGI(TAG, "HTTP RX%s id=%d connected=%d callback=%d wake=%u poll=%u qird=%u bytes=%u empty=%u errors=%u lock_busy=%u throttle=%u last=%d",
+                 final ? " END" : "", tcp_id_, (int)connected_, (int)!!can_receive_callback_,
+                 diag_wakes, diag_polls, diag_reads, diag_bytes, diag_empty,
+                 diag_errors, diag_busy, diag_throttle, last_qird_length_.load());
+    };
+#endif
 
     while (true) {
+        // A zero QIRD result is only a momentary empty modem buffer. Do not
+        // require another recv URC forever: notifications can be coalesced.
+        // Constructor starts this task before HttpClient installs its callback.
+        // Always bound the wait; registering a callback does not signal an event.
+        // The gate below still prevents polling sockets without a callback.
+        const TickType_t wait_ticks = pdMS_TO_TICKS(kBackpressureRecoveryPollMs);
         auto bits = xEventGroupWaitBits(
             event_group_handle_,
             EC801E_TCP_DATA_AVAILABLE | EC801E_TCP_RECEIVE_TASK_STOP,
-            pdTRUE, pdFALSE, portMAX_DELAY);
+            pdTRUE, pdFALSE, wait_ticks);
 
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+        log_receive(false);
+#endif
         if (bits & EC801E_TCP_RECEIVE_TASK_STOP) {
             break;
         }
-        if (!(bits & EC801E_TCP_DATA_AVAILABLE) || !connected_) {
+        if (!connected_) {
             continue;
+        }
+        const bool recovery_poll = !(bits & EC801E_TCP_DATA_AVAILABLE);
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+        if (recovery_poll) ++diag_polls; else ++diag_wakes;
+#endif
+        if (recovery_poll && (!can_receive_callback_ || !can_receive_callback_())) {
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+            if (can_receive_callback_) ++diag_throttle;
+#endif
+            continue;  // Keep intentional audio/HTTP backpressure intact.
         }
 
         bool needs_more_reads = false;
@@ -174,16 +211,25 @@ void Ec801ETcp::ReceiveTask() {
             if (can_receive_callback_ && !can_receive_callback_()) {
                 needs_more_reads = true;
                 receive_throttled = true;
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+                ++diag_throttle;
+#endif
                 break;
             }
 
             // 先拿到 AT 命令通道，确保只有当前 Tcp 实例处理没有 connectID
             // 字段的 +QIRD 返回。SendCommand 内部使用可递归锁，可安全重入。
             if (!at_uart_->TryLockChannel(200)) {
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+                ++diag_busy;
+#endif
                 needs_more_reads = true;
                 break;
             }
 
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+            ++diag_reads;
+#endif
             last_qird_length_.store(-1);
             qird_in_progress_.store(true);
             bool ok = at_uart_->SendCommand(
@@ -193,12 +239,24 @@ void Ec801ETcp::ReceiveTask() {
             at_uart_->UnlockChannel();
 
             if (!ok) {
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+                ++diag_errors;
+#endif
                 ESP_LOGW(TAG, "QIRD failed for id=%d", tcp_id_);
                 needs_more_reads = connected_;
                 break;
             }
 
             int actual_length = last_qird_length_.load();
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+            if (actual_length > 0) diag_bytes += actual_length;
+            else if (actual_length == 0) ++diag_empty;
+            else ++diag_errors;
+#endif
+            if (recovery_poll && actual_length > 0) {
+                ESP_LOGW(TAG, "Recovered stalled QIRD id=%d bytes=%d without recv URC",
+                         tcp_id_, actual_length);
+            }
             if (actual_length < 0) {
                 ESP_LOGW(TAG, "QIRD returned OK without a parsed length (id=%d)", tcp_id_);
                 needs_more_reads = connected_;
@@ -217,6 +275,9 @@ void Ec801ETcp::ReceiveTask() {
         }
     }
 
+#ifdef CONFIG_DEEPLISTEN_OTA_DOWNLOAD_TEST
+    log_receive(true);
+#endif
     xEventGroupSetBits(event_group_handle_, EC801E_TCP_RECEIVE_TASK_STOPPED);
 }
 

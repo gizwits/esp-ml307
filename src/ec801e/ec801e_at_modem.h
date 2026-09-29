@@ -9,6 +9,7 @@ public:
     ~Ec801EAtModem() override = default;
 
     bool SetSleepMode(bool enable, int delay_seconds=0) override;
+    bool GetNetworkTime(time_t& timestamp) override;
 
     // GNSS 定位（使用 Quectel AT+QGPS* 指令）
     void GetGnssLocation(GnssCallback callback, int timeout_seconds = 300) override;
@@ -26,6 +27,9 @@ protected:
 
 private:
     TcpAccessMode tcp_access_mode_;
+    bool network_time_query_active_ = false;  // Protected by mutex_.
+    bool network_time_valid_ = false;
+    time_t network_time_ = 0;
 };
 
 

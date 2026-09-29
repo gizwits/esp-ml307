@@ -1,5 +1,6 @@
 #include "ec801e_at_modem.h"
 #include "ec801e_gnss.h"
+#include "ec801e_network_time.h"
 #include <esp_log.h>
 #include <esp_err.h>
 #include <cassert>
@@ -28,7 +29,37 @@ Ec801EAtModem::Ec801EAtModem(std::shared_ptr<AtUart> at_uart,
 }
 
 void Ec801EAtModem::HandleUrc(const std::string& command, const std::vector<AtArgumentValue>& arguments) {
+    if (command == "QLTS") {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (network_time_query_active_) {
+            network_time_valid_ = arguments.size() == 1 &&
+                Ec801EParseNetworkTime(arguments[0].string_value, network_time_);
+        }
+        return;
+    }
     AtModem::HandleUrc(command, arguments);
+}
+
+bool Ec801EAtModem::GetNetworkTime(time_t& timestamp) {
+    // A UART callback cannot wait for a reply handled by the same UART worker.
+    // Never queue behind a busy SSE/MQTT command: the caller can retry later.
+    if (at_uart_->IsInUartTask() || !at_uart_->TryLockChannel(0)) return false;
+    struct ChannelGuard {
+        AtUart* uart;
+        ~ChannelGuard() { uart->UnlockChannel(); }
+    } guard{at_uart_.get()};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        network_time_valid_ = false;
+        network_time_query_active_ = true;
+    }
+    // The manual specifies 300ms; allow 500ms for UART transport/parsing.
+    const bool ok = at_uart_->SendCommand("AT+QLTS=1", 500);
+    std::lock_guard<std::mutex> lock(mutex_);
+    network_time_query_active_ = false;
+    if (!ok || !network_time_valid_) return false;
+    timestamp = network_time_;
+    return true;
 }
 
 bool Ec801EAtModem::SetSleepMode(bool enable, int delay_seconds) {

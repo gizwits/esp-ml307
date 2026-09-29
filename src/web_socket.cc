@@ -334,7 +334,7 @@ void WebSocket::OnTcpData(const std::string& data) {
         size_t pos = receive_buffer_.find("\r\n\r\n");
         if (pos != std::string::npos) {
             std::string handshake_response = receive_buffer_.substr(0, pos + 4);
-            receive_buffer_ = receive_buffer_.substr(pos + 4);
+            receive_buffer_.erase(0, pos + 4);
             
             if (handshake_response.find("HTTP/1.1 101") != std::string::npos) {
                 handshake_completed_ = true;
@@ -498,12 +498,11 @@ void WebSocket::OnTcpData(const std::string& data) {
 
     // 保留未处理的数据
     if (buffer_offset > 0) {
-        receive_buffer_ = receive_buffer_.substr(buffer_offset);
+        receive_buffer_.erase(0, buffer_offset);
         
-        // 内存优化：当容量远大于实际使用时才收缩
-        // 条件：1. 容量超过8KB 且 2. 容量是实际大小的4倍以上
-        if (receive_buffer_.capacity() > 1024 * 8 && 
-            receive_buffer_.capacity() > receive_buffer_.size() * 4) {
+        // Release large handshake/message storage only when empty. Shrinking
+        // a nonempty tail would allocate another buffer during receive pressure.
+        if (receive_buffer_.capacity() > 1024 * 8 && receive_buffer_.empty()) {
             receive_buffer_.shrink_to_fit();
             ESP_LOGD(TAG, "Shrinking receive buffer: capacity %zu -> %zu", 
                      receive_buffer_.capacity(), receive_buffer_.size());

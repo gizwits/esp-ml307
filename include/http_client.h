@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <optional>
 #include <memory>
+#include <atomic>
 #include <deque>
 #include <cstring>
 
@@ -85,6 +86,13 @@ private:
     int connect_id_;
     size_t max_buffer_size_ = 0;  // 最大缓冲区大小，0表示不限制
     std::function<bool()> can_receive_callback_;  // 接收限流回调（优先使用）
+    // Each Open owns a separate fence. Copied/late callbacks retain the fence,
+    // never permission to access a closed or subsequently reused HttpClient.
+    struct CallbackState {
+        std::mutex mutex;
+        std::atomic<bool> active{true};
+    };
+    std::shared_ptr<CallbackState> callback_state_;
     std::unique_ptr<Tcp> tcp_;
     EventGroupHandle_t event_group_handle_;
     std::mutex mutex_;
@@ -117,7 +125,7 @@ private:
     size_t content_length_ = 0;
     size_t total_body_received_ = 0;  // 总共接收的响应体字节数
     bool eof_ = false;
-    bool connected_ = false;
+    std::atomic<bool> connected_{false};
     bool headers_received_ = false;
     bool request_chunked_ = false;
     bool response_chunked_ = false;

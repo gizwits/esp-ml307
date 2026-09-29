@@ -131,14 +131,14 @@ bool EspMqtt::Subscribe(const std::string topic, int qos) {
     if (!connected_) {
         return false;
     }
-    return esp_mqtt_client_subscribe_single(mqtt_client_handle_, topic.c_str(), qos) == 0;
+    return esp_mqtt_client_subscribe_single(mqtt_client_handle_, topic.c_str(), qos) >= 0;
 }
 
 bool EspMqtt::Unsubscribe(const std::string topic) {
     if (!connected_) {
         return false;
     }
-    return esp_mqtt_client_unsubscribe(mqtt_client_handle_, topic.c_str()) == 0;
+    return esp_mqtt_client_unsubscribe(mqtt_client_handle_, topic.c_str()) >= 0;
 }
 
 bool EspMqtt::IsConnected() {

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <sstream>
 #include <chrono>
+#include <atomic>
 #include <algorithm>
 #include <cctype>
 
@@ -23,9 +24,9 @@ void HttpClient::SetCanReceiveCallback(std::function<bool()> callback) {
 }
 
 HttpClient::~HttpClient() {
-    if (connected_) {
-        Close();
-    }
+    // Release TCP while ALL callback targets (locks, queues, event group) live.
+    // A failed Open can still own a transport, even though connected_ is false.
+    Close();
     vEventGroupDelete(event_group_handle_);
 }
 
@@ -150,6 +151,7 @@ std::string HttpClient::BuildHttpRequest() {
 }
 
 bool HttpClient::Open(const std::string& method, const std::string& url) {
+    Close();  // Drain the previous attempt before resetting its response state.
     method_ = method;
     url_ = url;
 
@@ -190,18 +192,26 @@ bool HttpClient::Open(const std::string& method, const std::string& url) {
         tcp_ = network_->CreateTcp(connect_id_);
     }
 
+    callback_state_ = std::make_shared<CallbackState>();
+
     // 设置 TCP 数据接收回调
-    tcp_->OnStream([this](const std::string& data) {
+    tcp_->OnStream([this, state = callback_state_](const std::string& data) {
+        std::lock_guard<std::mutex> callback_lock(state->mutex);
+        if (!state->active.load()) return;
         OnTcpData(data);
     });
 
     // 设置 TCP 断开连接回调
-    tcp_->OnDisconnected([this]() {
+    tcp_->OnDisconnected([this, state = callback_state_]() {
+        std::lock_guard<std::mutex> callback_lock(state->mutex);
+        if (!state->active.load()) return;
         OnTcpDisconnected();
     });
     
     // 设置接收限流回调
-    tcp_->OnCanReceive([this]() {
+    tcp_->OnCanReceive([this, state = callback_state_, paused = false, reported = false, pauses = 0u, pause_start = std::chrono::steady_clock::time_point{}, last_warning = std::chrono::steady_clock::time_point{}]() mutable {
+        std::lock_guard<std::mutex> callback_lock(state->mutex);
+        if (!state->active.load()) return false;
         // 优先使用外部回调（更精确，如检查音频解码队列）
         if (can_receive_callback_) {
             return can_receive_callback_();
@@ -215,7 +225,29 @@ bool HttpClient::Open(const std::string& method, const std::string& url) {
                 total_size += chunk.data.size();
             }
             // 如果缓冲区超过80%满，暂停接收
-            return total_size < max_buffer_size_ * 0.8;
+            const bool allowed = total_size < max_buffer_size_ * 0.8;
+            const auto now = std::chrono::steady_clock::now();
+            if (!allowed) {
+                if (!paused) { paused = true; pause_start = now; ++pauses; }
+                if (last_warning == std::chrono::steady_clock::time_point{} ||
+                    now - last_warning >= std::chrono::seconds(5)) {
+                    ESP_LOGW(TAG, "HTTP RX PAUSE id=%d reason=buffer_full queued=%u limit=%u heap=%u wait_ms=%lu pauses=%u",
+                             connect_id_, (unsigned)total_size, (unsigned)max_buffer_size_,
+                             (unsigned)esp_get_free_heap_size(),
+                             (unsigned long)std::chrono::duration_cast<std::chrono::milliseconds>(now - pause_start).count(), pauses);
+                    last_warning = now;
+                    reported = true;
+                }
+            } else if (paused) {
+                if (reported) {
+                    ESP_LOGI(TAG, "HTTP RX RESUME id=%d queued=%u wait_ms=%lu",
+                             connect_id_, (unsigned)total_size,
+                             (unsigned long)std::chrono::duration_cast<std::chrono::milliseconds>(now - pause_start).count());
+                }
+                paused = false;
+                reported = false;
+            }
+            return allowed;
         }
         
         // 默认允许接收
@@ -223,6 +255,9 @@ bool HttpClient::Open(const std::string& method, const std::string& url) {
     });
     if (!tcp_->Connect(host_, port_)) {
         ESP_LOGE(TAG, "TCP connection failed");
+        Close();
+        connection_error_ = true;
+        xEventGroupSetBits(event_group_handle_, EC801E_HTTP_EVENT_ERROR);
         return false;
     }
 
@@ -233,15 +268,17 @@ bool HttpClient::Open(const std::string& method, const std::string& url) {
     std::string http_request = BuildHttpRequest();
     if (tcp_->Send(http_request) <= 0) {
         ESP_LOGE(TAG, "Send HTTP request failed");
-        tcp_->Disconnect();
-        connected_ = false;
+        Close();
+        connection_error_ = true;
+        xEventGroupSetBits(event_group_handle_, EC801E_HTTP_EVENT_ERROR);
         return false;
     }
     if (content_.has_value() && !content_->empty()) {
         if (tcp_->Send(*content_) <= 0) {
             ESP_LOGE(TAG, "Send HTTP content failed");
-            tcp_->Disconnect();
-            connected_ = false;
+            Close();
+            connection_error_ = true;
+            xEventGroupSetBits(event_group_handle_, EC801E_HTTP_EVENT_ERROR);
             return false;
         }
     }
@@ -250,15 +287,27 @@ bool HttpClient::Open(const std::string& method, const std::string& url) {
 }
 
 void HttpClient::Close() {
-    if (!connected_) {
-        return;
+    auto state = callback_state_;
+    if (state) state->active.store(false);
+    {
+        // Release an OnTcpData callback blocked by receive backpressure before
+        // waiting for the callback fence. Never hold mutex_ while draining TCP.
+        std::lock_guard<std::mutex> read_lock(read_mutex_);
+        connected_ = false;
     }
-
-    connected_ = false;
     write_cv_.notify_all();
-    tcp_->Disconnect();
-
-    eof_ = true;
+    if (state) {
+        std::lock_guard<std::mutex> callback_lock(state->mutex);
+        // Any callback already using this object has now returned.
+    }
+    // Do not clear std::function slots concurrently with transport threads.
+    // Their retained fence rejects callbacks, including destructor callbacks.
+    tcp_.reset();
+    callback_state_.reset();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        eof_ = true;
+    }
     cv_.notify_all();
     ESP_LOGD(TAG, "HTTP connection closed");
 }
@@ -269,27 +318,46 @@ void HttpClient::OnTcpData(const std::string& data) {
     // 如果设置了最大缓冲区大小，检查是否超过限制
     if (max_buffer_size_ > 0) {
         std::unique_lock<std::mutex> read_lock(read_mutex_);
-        size_t total_size = data.size();
-        for (const auto& chunk : body_chunks_) {
-            total_size += chunk.data.size();
-        }
-        // 如果超过最大缓冲区大小，等待直到有空间
-        write_cv_.wait(read_lock, [this, total_size] {
-            return total_size < max_buffer_size_ || !connected_;
+        // Recount under read_mutex_ after every consumer notification.
+        // Permit a single oversized transport chunk into an empty queue so a
+        // limit smaller than that chunk cannot permanently block reception.
+        write_cv_.wait(read_lock, [this, incoming = data.size()] {
+            size_t queued = 0;
+            for (const auto& chunk : body_chunks_) queued += chunk.data.size();
+            return !connected_ || queued == 0 ||
+                   (queued <= max_buffer_size_ && incoming <= max_buffer_size_ - queued);
         });
     } else {
-        // 旧逻辑：检查 body_chunks_ 大小，如果超过 8KB 且 heap 小于 32KB 则阻塞
+        // 旧逻辑：检查 body_chunks_ 大小，如果达到 8KiB 且 heap 小于 20KiB 则阻塞
         std::unique_lock<std::mutex> read_lock(read_mutex_);
-        write_cv_.wait(read_lock, [this, size=data.size()] {
-            size_t total_size = size;
-            for (const auto& chunk : body_chunks_) {
-                total_size += chunk.data.size();
+        const auto started = std::chrono::steady_clock::now();
+        // Shared rate limit also covers many short waits across HTTP clients.
+        static std::atomic<int64_t> last_warning_ms{-5000};
+        bool reported = false;
+        while (connected_) {
+            size_t queued = 0;
+            for (const auto& chunk : body_chunks_) queued += chunk.data.size();
+            const size_t heap = esp_get_free_heap_size();
+            if (queued + data.size() < MAX_BODY_CHUNKS_SIZE || heap >= 20 * 1024) break;
+            const auto now = std::chrono::steady_clock::now();
+            const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+            int64_t previous = last_warning_ms.load();
+            if (now_ms - previous >= 5000 && last_warning_ms.compare_exchange_strong(previous, now_ms)) {
+                ESP_LOGW(TAG, "HTTP RX WAIT id=%d reason=low_heap queued=%u incoming=%u heap=%u threshold=20480 wait_ms=%lu",
+                         connect_id_, (unsigned)queued, (unsigned)data.size(), (unsigned)heap,
+                         (unsigned long)std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count());
+                reported = true;
             }
-            size_t free_heap = esp_get_free_heap_size();
-            return total_size < MAX_BODY_CHUNKS_SIZE || !connected_ || free_heap >= 32768;
-        });
+            write_cv_.wait_for(read_lock, std::chrono::milliseconds(100));
+        }
+        if (reported) {
+            ESP_LOGI(TAG, "HTTP RX WAIT END id=%d connected=%d wait_ms=%lu",
+                     connect_id_, (int)connected_,
+                     (unsigned long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count());
+        }
     }
 
+    if (!connected_) return;  // Close may have released the buffer wait.
     rx_buffer_.append(data);
     ProcessReceivedData();
     cv_.notify_one();
@@ -721,6 +789,7 @@ int HttpClient::Write(const char* buffer, size_t buffer_size) {
 }
 
 int HttpClient::GetStatusCode() {
+    if (connection_error_) return -1;
     if (!headers_received_) {
         // 等待头部接收
         auto bits = xEventGroupWaitBits(event_group_handle_,

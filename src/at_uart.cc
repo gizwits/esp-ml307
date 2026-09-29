@@ -680,6 +680,19 @@ bool AtUart::ParseResponse() {
         }
         rx_buffer_.erase(0, end_pos + 2);
 
+        // QLTS contains commas inside its quoted date/time. Preserve the raw
+        // value for the modem's strict parser instead of splitting it as CSV.
+        if (command == "QLTS") {
+            AtArgumentValue value{};
+            value.type = AtArgumentValue::Type::String;
+            value.string_value = std::move(values);
+            std::vector<AtArgumentValue> arguments;
+            arguments.push_back(std::move(value));
+            lock.unlock();
+            HandleUrc(command, arguments);
+            return true;
+        }
+
         // Parse "string", int, int, ... into AtArgumentValue
         std::vector<AtArgumentValue> arguments;
         std::istringstream iss(values);
